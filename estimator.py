@@ -159,11 +159,16 @@ class TabMixNN:
         self.design = None
         self.model = None
         self.history = []
+        self.val_history = []
 
     def fit(self, df, y=None, state_dict=None, reuse_design=None,
             val_df=None, val_fraction=0.0, early_stopping=False,
             patience=5, min_delta=0.0):
         """Fit the TabMixNN model to training data."""
+        
+        # Reset histories
+        self.history = []
+        self.val_history = []
         
         # Log fit start
         self.logger.info(f"Starting fit with {len(df)} samples, val_fraction={val_fraction}")
@@ -362,7 +367,7 @@ class TabMixNN:
             self.history.append(train_epoch_loss)
             
             val_epoch_loss = None
-            if early_stopping and val_tensors is not None:
+            if val_tensors is not None:
                 self.model.eval()
                 with torch.no_grad():
                     Xv_t, Zv_ind_t, Zv_slopes_t, Yv_t = val_tensors
@@ -390,22 +395,24 @@ class TabMixNN:
                     kl_scaled_v = kl_v * kl_weight * val_batch_frac
                     sparse_loss_v = self.model.get_sparsity_loss(self._lambda_sparse_weights())
                     val_epoch_loss = (nll_total_v + kl_scaled_v + sparse_loss_v).item()
+                    self.val_history.append(val_epoch_loss)
 
-                if val_epoch_loss + min_delta < best_val:
-                    best_val = val_epoch_loss
-                    best_state = {k: v.detach().clone() for k, v in self.model.state_dict().items()}
-                    patience_ctr = 0
-                    self.logger.debug(f"Epoch {epoch}: New best validation loss: {best_val:.4f}")
-                else:
-                    patience_ctr += 1
-                    if patience_ctr >= patience:
-                        self.logger.info(
-                            f"Early stopping at epoch {epoch} (patience={patience}, "
-                            f"best_val={best_val:.4f})"
-                        )
-                        if best_state is not None:
-                            self.model.load_state_dict(best_state)
-                        break
+                if early_stopping:
+                    if val_epoch_loss + min_delta < best_val:
+                        best_val = val_epoch_loss
+                        best_state = {k: v.detach().clone() for k, v in self.model.state_dict().items()}
+                        patience_ctr = 0
+                        self.logger.debug(f"Epoch {epoch}: New best validation loss: {best_val:.4f}")
+                    else:
+                        patience_ctr += 1
+                        if patience_ctr >= patience:
+                            self.logger.info(
+                                f"Early stopping at epoch {epoch} (patience={patience}, "
+                                f"best_val={best_val:.4f})"
+                            )
+                            if best_state is not None:
+                                self.model.load_state_dict(best_state)
+                            break
             
             # Log progress periodically
             if epoch % max(1, self.epochs // 10) == 0 or epoch == self.epochs:
