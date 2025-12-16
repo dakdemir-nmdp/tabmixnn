@@ -4,6 +4,7 @@ import numpy as np
 import pickle
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
+from .families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks
 
 @dataclass
 class OutcomeSpec:
@@ -27,6 +28,7 @@ class RandomEffectTerm:
     slope_cols: List[str] # ["Intercept", "slope1", ...]
     level_map: Dict[Any, int] = field(default_factory=dict)
     train_levels: List[Any] = field(default_factory=list)  # specific to K-covariance support
+    slope_stats: Dict[str, Any] = field(default_factory=dict)  # mean/std per non-intercept slope
 
 class CompiledDesign:
     def __init__(self, formula, outcomes, sam_location, sam_dim, cov_struct_map=None):
@@ -41,6 +43,7 @@ class CompiledDesign:
         self.fixed_dummy_cols = [] # If OneHot used
         self.numeric_transformer_params = {} # mean, scale per col
         self.categorical_levels = {} # col -> list of levels
+        self.categorical_dummy_levels = {} # col -> levels actually encoded
         self.intercept_included = True
         
         # Random effects state
@@ -170,6 +173,9 @@ class CompiledDesign:
                 # Blueprint: "categorical fixed levels and contrast coding scheme"
                 levels = sorted(df[col_name].dropna().unique())
                 self.categorical_levels[col_name] = levels
+                # If intercept included, drop first level to avoid collinearity
+                dummy_levels = levels[1:] if self.intercept_included else levels
+                self.categorical_dummy_levels[col_name] = dummy_levels
                 self.fixed_cols.append({'name': col_name, 'type': 'categorical'})
 
     def _transform_fixed(self, df):
@@ -189,11 +195,15 @@ class CompiledDesign:
             else:
                 # Categorical
                 levels = self.categorical_levels[col]
+                dummy_levels = self.categorical_dummy_levels.get(col, levels)
                 # Map to indices
                 # pd.Categorical
                 cat = pd.Categorical(df[col], categories=levels)
                 # One hot
-                dummies = pd.get_dummies(cat, drop_first=False) # Maybe drop_first if intercept?
+                drop_first = self.intercept_included
+                dummies = pd.get_dummies(cat, drop_first=drop_first)
+                # Reindex to ensure stable column order and dropped base handling
+                dummies = dummies.reindex(columns=dummy_levels, fill_value=0)
                 # For ML, full rank isn't always strictly required given regularization, 
                 # but let's stick to simple one-hot for now.
                 # If intercept is included, we usually drop first.
@@ -226,13 +236,26 @@ class CompiledDesign:
                 uniques = df[group].dropna().unique()
                 mapping = {val: i+1 for i, val in enumerate(uniques)}
                 train_levels = list(uniques)
+
+            slope_stats = {}
+            for s in slopes:
+                if s == "Intercept":
+                    continue
+                if s not in df.columns:
+                    raise ValueError(f"Random slope column {s} not found in dataframe.")
+                mu = df[s].mean()
+                sigma = df[s].std()
+                if sigma == 0:
+                    sigma = 1.0
+                slope_stats[s] = (mu, sigma)
             
             term = RandomEffectTerm(
                 term_id=spec['term_id'],
                 group_col=group,
                 slope_cols=slopes,
                 level_map=mapping,
-                train_levels=train_levels
+                train_levels=train_levels,
+                slope_stats=slope_stats
             )
             self.random_terms.append(term)
 
@@ -244,7 +267,9 @@ class CompiledDesign:
         for term in self.random_terms:
             # 1. Group Indices
             # 0 is reserved for unknown
-            indices = df[term.group_col].map(term.level_map).fillna(0).astype(int).values
+            # Convert to object to avoid pandas Categorical fillna restriction
+            group_vals = df[term.group_col].astype(object)
+            indices = group_vals.map(term.level_map).fillna(0).astype(int).values
             Z_ind.append(indices)
             
             # 2. Slopes
@@ -255,10 +280,10 @@ class CompiledDesign:
                     slope_vals.append(np.ones(len(df)))
                 else:
                     # Assume numeric slope for now
-                    # We might need to standardize slopes too for stability? 
-                    # Blueprint 4.1 "slope standardization parameters (optional; recommended)"
-                    # Let's skip standardization for MV for now, assume raw values
-                    slope_vals.append(df[s].fillna(0).values) # Fillna 0 for slopes
+                    mu, sigma = term.slope_stats.get(s, (0.0, 1.0))
+                    vals = df[s].fillna(mu)
+                    vals = (vals - mu) / sigma
+                    slope_vals.append(vals.values)
             
             slope_mat = np.stack(slope_vals, axis=1).astype(np.float32)
             Z_slopes.append(slope_mat)
@@ -269,7 +294,32 @@ class CompiledDesign:
         # Extract targets based on family
         # Returns numpy array
         cols = outcome.get_target_cols()
+        family = outcome.family
+
+        if isinstance(family, DiscreteTimeSurvival):
+            # Map continuous/discrete times to bin indices
+            time_vals = df[outcome.time].values
+            event = df[outcome.event].values
+            time_idx = self._time_to_index(family.time_bins, time_vals)
+            return np.stack([time_idx, event], axis=1).astype(np.float32)
+
+        if isinstance(family, DiscreteTimeCompetingRisks):
+            time_vals = df[outcome.time].values
+            cause_vals = df[outcome.cause].values
+            time_idx = self._time_to_index(family.time_bins, time_vals)
+            return np.stack([time_idx, cause_vals], axis=1).astype(np.float32)
+
         return df[cols].values.astype(np.float32)
+
+    def _time_to_index(self, time_bins, time_array):
+        """
+        Convert raw times to discrete bin indices in [0, len(time_bins)-1].
+        Uses searchsorted with right-closed intervals and clips out-of-range times.
+        """
+        tb = np.asarray(time_bins)
+        idx = np.searchsorted(tb, time_array, side="right")
+        idx = np.clip(idx, 0, len(tb) - 1)
+        return idx.astype(np.int64)
 
     def save(self, path):
         with open(path, 'wb') as f:

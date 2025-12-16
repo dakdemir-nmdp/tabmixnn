@@ -3,9 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-class Family:
+class Family(nn.Module):
+    """Base class for outcome families. Now inherits from nn.Module to support learnable parameters."""
     def __init__(self):
-        pass
+        super().__init__()
 
     @property
     def n_params(self):
@@ -21,40 +22,50 @@ class Family:
 
     def predict(self, theta, mode="default", **kwargs):
         raise NotImplementedError
-    
+
     def validate_targets(self, df, target_cols):
         pass
 
 class Gaussian(Family):
-    def __init__(self, link="identity"):
+    def __init__(self, link="identity", init_log_sigma=0.0):
+        """
+        Gaussian family with global learned residual variance.
+
+        Args:
+            link: Link function (only 'identity' supported)
+            init_log_sigma: Initial value for log(sigma). Default 0.0 -> sigma=1.0
+        """
         super().__init__()
         self.link = link
+        # Global learned residual standard deviation (more stable than per-sample)
+        self.log_sigma = nn.Parameter(torch.tensor(init_log_sigma))
 
     @property
     def n_params(self):
-        # mean and log_std (or we can treat std as global param, but here let's predict it for full flexibility or use 1 if fixed)
-        # Blueprint says: mu=eta, optionally sigma=exp(delta) (global or predicted). 
-        # Let's assume simpler case: 1 output for mu, sigma is a learnable scaler handled elsewhere or we output 2 params.
-        # For this implementation, let's output 2 params: mu and log_sigma for maximum flexibility
-        return 2 
+        # Only predict mean μ; σ is global and learned separately
+        return 1
 
     def forward_params(self, eta):
-        # eta is [batch, 2] -> mu, log_sigma
-        mu = eta[:, 0]
-        log_sigma = eta[:, 1]
-        return mu, log_sigma
+        # eta is [batch, 1] -> mu only
+        mu = eta.squeeze(-1)
+        return mu
 
     def nll(self, theta, y, **kwargs):
-        mu = theta[:, 0]
-        log_sigma = theta[:, 1]
-        # y might be shape [batch] or [batch, 1]
+        # theta is just mu (1D tensor)
+        mu = theta.squeeze() if isinstance(theta, torch.Tensor) else theta
         y = y.squeeze()
-        sigma = torch.exp(log_sigma)
+
+        # Use global learned sigma (clamped for numerical stability)
+        from .constants import MIN_LOG_SIGMA, MAX_LOG_SIGMA, EPSILON
+        log_sigma = torch.clamp(self.log_sigma, min=MIN_LOG_SIGMA, max=MAX_LOG_SIGMA)
+        sigma = torch.exp(log_sigma) + EPSILON
+
         return -torch.distributions.Normal(mu, sigma).log_prob(y).mean()
 
     def predict(self, theta, mode="default", **kwargs):
-        mu = theta[:, 0]
-        return mu.cpu().numpy()
+        # theta is just mu
+        mu = theta.squeeze() if isinstance(theta, torch.Tensor) else theta
+        return mu.cpu().numpy() if isinstance(mu, torch.Tensor) else mu
 
 class Binomial(Family):
     def __init__(self, link="logit"):
@@ -104,6 +115,8 @@ class Poisson(Family):
 class NegBinomial(Family):
     def __init__(self):
         super().__init__()
+        from .logging_config import get_logger
+        self.logger = get_logger("families")
 
     @property
     def n_params(self):
@@ -116,36 +129,42 @@ class NegBinomial(Family):
         # Based on NB2 parameterization
         # mu = exp(eta_mu), alpha = exp(eta_alpha)
         # Var = mu + alpha * mu^2
-        # PyTorch doesn't have a direct NegBin NLL with this parameterization usually, 
-        # but we can implement it via lgamma.
-        # Or use torch.distributions.NegativeBinomial
-        # PyTorch NegBin uses total_count (r) and probs (p) or logits.
-        # Mean = r(1-p)/p. 
-        # We need mapping. 
-        # mu = r(1-p)/p
-        # alpha = 1/r => r = 1/alpha
-        log_mu = theta[:, 0]
-        log_alpha = theta[:, 1]
-        mu = torch.exp(log_mu)
-        alpha = torch.exp(log_alpha)
-        
-        # r = 1/alpha
-        r = 1.0 / (alpha + 1e-6)
-        
-        # p = r / (r + mu)
+        if isinstance(theta, (tuple, list)):
+            log_mu, log_alpha = theta
+        else:
+            log_mu = theta[:, 0]
+            log_alpha = theta[:, 1]
+        # Clamp to avoid overflow/underflow and keep gradients flowing.
+        from .constants import MIN_LOG_PARAM, MAX_LOG_PARAM, LARGE_PENALTY
+        log_mu = torch.clamp(log_mu, min=MIN_LOG_PARAM, max=MAX_LOG_PARAM)
+        log_alpha = torch.clamp(log_alpha, min=MIN_LOG_PARAM, max=MAX_LOG_PARAM)
+
+        mu = torch.exp(log_mu) + 1e-6
+        alpha = torch.exp(log_alpha) + 1e-6
+
+        # NB2: r = 1/alpha, p = r/(r+mu)
+        r = 1.0 / alpha
         p = r / (r + mu)
-        
-        # Create distribution
-        try:
-            dist = torch.distributions.NegativeBinomial(total_count=r, probs=p)
-            nll = -dist.log_prob(y.squeeze()).mean()
-            return nll
-        except ValueError:
-            # Fallback or numerical stability
-            return torch.tensor(0.0, requires_grad=True, device=mu.device)
+
+        dist = torch.distributions.NegativeBinomial(total_count=r, probs=p)
+        nll = -dist.log_prob(y.squeeze()).mean()
+
+        # ERROR RECOVERY: Return large penalty instead of crashing
+        if torch.isnan(nll) or torch.isinf(nll):
+            self.logger.warning(
+                f"NegativeBinomial NLL is invalid ({nll.item():.2e}). "
+                f"log_mu range: [{log_mu.min().item():.2f}, {log_mu.max().item():.2f}], "
+                f"log_alpha range: [{log_alpha.min().item():.2f}, {log_alpha.max().item():.2f}]. "
+                f"Returning large penalty to continue training."
+            )
+            return torch.tensor(LARGE_PENALTY, device=nll.device, dtype=nll.dtype)
+        return nll
 
     def predict(self, theta, mode="default", **kwargs):
-        log_mu = theta[:, 0]
+        if isinstance(theta, (tuple, list)):
+            log_mu = theta[0]
+        else:
+            log_mu = theta[:, 0]
         return torch.exp(log_mu).cpu().numpy()
 
 class DiscreteTimeSurvival(Family):
@@ -198,7 +217,8 @@ class DiscreteTimeSurvival(Family):
         
         h = torch.sigmoid(theta)
         # numerical stability check
-        h = torch.clamp(h, 1e-7, 1 - 1e-7)
+        from .constants import HAZARD_CLIP_MIN, HAZARD_CLIP_MAX
+        h = torch.clamp(h, HAZARD_CLIP_MIN, HAZARD_CLIP_MAX)
         
         # Log terms
         log_1_minus_h = torch.log(1 - h)

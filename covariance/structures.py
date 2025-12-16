@@ -254,8 +254,8 @@ class GPCovariance(CovarianceStructure):
 
         # Gather batch rows with UNK padding at 0
         idx_adj = torch.clamp(indices, min=0)
-        zero_row = torch.zeros(1, self.n_slopes, emb, device=v_train.device)
-        u_all_padded = torch.cat([zero_row, u_all], dim=0)
+        unknown_row = u_all.mean(dim=0, keepdim=True)
+        u_all_padded = torch.cat([unknown_row, u_all], dim=0)
         gathered = u_all_padded[idx_adj]
         return gathered
 
@@ -373,7 +373,7 @@ class KCovariance(CovarianceStructure):
         idx_adj = torch.clamp(idx_adj, min=0)
         # build padded to account for unknown at 0; our u_all corresponds to full_levels starting at 0 offset
         # we insert a zero row at top
-        zero_row = torch.zeros(1, self.n_slopes, u_train.shape[2], device=u_all.device)
-        u_all_padded = torch.cat([zero_row, u_all], dim=0)
+        unknown_row = u_all.mean(dim=0, keepdim=True)
+        u_all_padded = torch.cat([unknown_row, u_all], dim=0)
         gathered = u_all_padded[idx_adj]
         return gathered
