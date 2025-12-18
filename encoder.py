@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 from .formula import CompiledDesign
-from .model import MixedEffectsRepresentation, SAMLayer, TabMixNNModule
+from .model import MixedEffectsRepresentation, SEMLayer, TabMixNNModule
 
 
 @dataclass
@@ -90,7 +90,7 @@ class MixedEffectsEncoder(nn.Module):
         self.output_dim = embedding_dim
         if add_sam and embedding_dim > 1:
             # SAM always matches embedding_dim (no separate sam_dim parameter)
-            self.sam = SAMLayer(embedding_dim)
+            self.sam = SEMLayer(embedding_dim)
             self.output_dim = embedding_dim
 
     def forward(self, X, Z_indices, Z_slopes):

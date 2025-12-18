@@ -9,6 +9,7 @@ import pickle
 from tqdm import tqdm
 from .formula import CompiledDesign, OutcomeSpec
 from .model import TabMixNNModule
+from .universal_model import UniversalSAMNNModule
 from .families import Binomial, Gaussian
 from .logging_config import get_logger
 from .constants import (
@@ -31,6 +32,10 @@ class TabMixNN:
                  sam_location="output",
                  sam_dim=None,
                  hidden_dims=None,
+                 hidden_layer_type="mlp",  # NEW: "mlp" or "universal_samnn"
+                 manifold_configs=None,    # NEW: For universal_samnn
+                 use_recursive=True,       # NEW: For universal_samnn
+                 aggregation="concat",     # NEW: For universal_samnn
                  embedding_dim=16,
                  lr=0.001,
                  weight_decay=1e-4,
@@ -42,7 +47,7 @@ class TabMixNN:
                  scale_random_by_terms=True,
                  mixed_activation="relu",
                  hidden_dropout=0.0,
-                 hidden_layer_norm=False,
+                 hidden_layer_norm=True,
                  hidden_residual=True,
                  sam_residual=True,
                  sam_residual_scale=1.0,
@@ -103,12 +108,24 @@ class TabMixNN:
                 f"unknown_strategy must be one of {VALID_UNKNOWN_STRATEGIES}, got '{unknown_strategy}'"
             )
         
+        # Validate hidden_layer_type
+        if hidden_layer_type not in ["mlp", "universal_samnn"]:
+            raise ValueError(
+                f"hidden_layer_type must be 'mlp' or 'universal_samnn', got '{hidden_layer_type}'"
+            )
+        
         # Validate hidden_dims
         if hidden_dims is not None:
             if not isinstance(hidden_dims, list):
                 raise ValueError(f"hidden_dims must be a list, got {type(hidden_dims).__name__}")
             if not all(isinstance(d, int) and d > 0 for d in hidden_dims):
                 raise ValueError(f"All values in hidden_dims must be positive integers, got {hidden_dims}")
+        
+        # Validate aggregation for universal_samnn
+        if aggregation not in ["concat", "sum", "last"]:
+            raise ValueError(
+                f"aggregation must be 'concat', 'sum', or 'last', got '{aggregation}'"
+            )
         
         # Validate sam_dim if provided
         if sam_dim is not None and sam_dim <= 0:
@@ -137,6 +154,10 @@ class TabMixNN:
         self.sam_location = sam_location
         self.sam_dim = sam_dim
         self.hidden_dims = DEFAULT_HIDDEN_DIMS if hidden_dims is None else hidden_dims
+        self.hidden_layer_type = hidden_layer_type
+        self.manifold_configs = manifold_configs
+        self.use_recursive = use_recursive
+        self.aggregation = aggregation
         self.embedding_dim = embedding_dim
         self.lr = lr
         self.weight_decay = weight_decay
@@ -243,26 +264,45 @@ class TabMixNN:
         # 4. Initialize Model
         input_dim = X.shape[1]
         
-        self.logger.info(f"Initializing TabMixNNModule with input_dim={input_dim}...")
-        self.model = TabMixNNModule(
-            fixed_input_dim=input_dim,
-            compiled_design=self.design,
-            embedding_dim=self.embedding_dim,
-            hidden_dims=self.hidden_dims,
-            sam_location=self.sam_location,
-            sam_dim=self.sam_dim,  # Matches layer width if None
-            cov_struct_map=self.cov_struct,
-            mixed_activation=self.mixed_activation,
-            kl_normalize=True,  # Hardcoded: always normalize KL by # params
-            scale_random_by_terms=self.scale_random_by_terms,
-            unknown_strategy=self.unknown_strategy,
-            sam_residual=self.sam_residual,
-            sam_residual_scale=self.sam_residual_scale,
-            sam_max_offdiag=self.sam_max_offdiag,
-            hidden_dropout=self.hidden_dropout,
-            hidden_layer_norm=self.hidden_layer_norm,
-            hidden_residual=self.hidden_residual
-        ).to(self.device)
+        # Choose model type based on hidden_layer_type
+        if self.hidden_layer_type == "universal_samnn":
+            self.logger.info(f"Initializing UniversalSAMNNModule with input_dim={input_dim}...")
+            self.model = UniversalSAMNNModule(
+                fixed_input_dim=input_dim,
+                compiled_design=self.design,
+                embedding_dim=self.embedding_dim,
+                hidden_dims=self.hidden_dims,
+                manifold_configs=self.manifold_configs,
+                cov_struct_map=self.cov_struct,
+                mixed_activation=self.mixed_activation,
+                kl_normalize=True,
+                scale_random_by_terms=self.scale_random_by_terms,
+                unknown_strategy=self.unknown_strategy,
+                use_recursive=self.use_recursive,
+                aggregation=self.aggregation,
+                hidden_dropout=self.hidden_dropout
+            ).to(self.device)
+        else:  # "mlp"
+            self.logger.info(f"Initializing TabMixNNModule with input_dim={input_dim}...")
+            self.model = TabMixNNModule(
+                fixed_input_dim=input_dim,
+                compiled_design=self.design,
+                embedding_dim=self.embedding_dim,
+                hidden_dims=self.hidden_dims,
+                sam_location=self.sam_location,
+                sam_dim=self.sam_dim,  # Matches layer width if None
+                cov_struct_map=self.cov_struct,
+                mixed_activation=self.mixed_activation,
+                kl_normalize=True,  # Hardcoded: always normalize KL by # params
+                scale_random_by_terms=self.scale_random_by_terms,
+                unknown_strategy=self.unknown_strategy,
+                sam_residual=self.sam_residual,
+                sam_residual_scale=self.sam_residual_scale,
+                sam_max_offdiag=self.sam_max_offdiag,
+                hidden_dropout=self.hidden_dropout,
+                hidden_layer_norm=self.hidden_layer_norm,
+                hidden_residual=self.hidden_residual
+            ).to(self.device)
         
         if state_dict is not None:
             self.model.load_state_dict(state_dict, strict=False)
@@ -485,6 +525,10 @@ class TabMixNN:
             "sam_location": self.sam_location,
             "sam_dim": self.sam_dim,
             "hidden_dims": self.hidden_dims,
+            "hidden_layer_type": self.hidden_layer_type,
+            "manifold_configs": self.manifold_configs,
+            "use_recursive": self.use_recursive,
+            "aggregation": self.aggregation,
             "embedding_dim": self.embedding_dim,
             "lr": self.lr,
             "weight_decay": self.weight_decay,
