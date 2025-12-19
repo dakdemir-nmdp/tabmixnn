@@ -4,7 +4,251 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 from .formula import CompiledDesign
-from .model import MixedEffectsRepresentation, SEMLayer, TabMixNNModule
+from .layers.sem import SEMLayer
+from .covariance import (
+    IIDCovariance,
+    AR1Covariance,
+    ARMACovariance,
+    CompoundSymmetryCovariance,
+    UnstructuredSlopeCovariance,
+    KroneckerCovariance,
+    KCovariance,
+    GPCovariance,
+)
+
+
+class MixedEffectsRepresentation(nn.Module):
+    def __init__(self, fixed_input_dim, embedding_dim, random_terms_config, cov_struct_map=None, kl_normalize=True, scale_random_by_terms=False, unknown_strategy="learned"):
+        super().__init__()
+        # Fixed part
+        self.fixed_linear = nn.Linear(fixed_input_dim, embedding_dim)
+        self.kl_normalize = kl_normalize
+        self.scale_random_by_terms = scale_random_by_terms
+        self.unknown_strategy = unknown_strategy
+        
+        self.random_terms = nn.ModuleDict()
+        self.variational_params = nn.ParameterDict() # For mu, log_scale
+        # Deprecate simple variance_components dict, use Covariance modules
+        self.cov_modules = nn.ModuleDict()
+        self.unknown_params = nn.ParameterDict()
+        
+        self.embedding_dim = embedding_dim
+        self.config = random_terms_config # List of dicts
+        
+        for term in random_terms_config:
+            tid = term['term_id']
+            # e.g. term_0
+            # group_col needed to lookup cov type?
+            # We pass cov_struct_map which maps group_col -> type.
+            # term['group_col'] needs to be in random_terms_config passed from design?
+            # Currently model init only gets minimal config.
+            # We assume default IID.
+            
+            n_levels = term['n_levels']
+            n_slopes = term['n_slopes']
+            group_name = term.get('group', 'unknown') # Add group name to config in next step
+            train_levels = term.get('train_levels', [])
+            
+            # Select Covariance
+            # Default IID
+            ctype = "IID"
+            cargs = {}
+            if cov_struct_map and group_name in cov_struct_map:
+                spec = cov_struct_map[group_name]
+                ctype = spec.get("type", "IID").upper()
+                cargs = spec
+            else:
+                ctype = "IID"
+                cargs = {}
+
+            if ctype == "AR1":
+                self.variational_params[tid] = nn.ParameterList([
+                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
+                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
+                ])
+                self.cov_modules[tid] = AR1Covariance(n_levels, n_slopes)
+
+            elif ctype in ["AR", "ARMA"]:
+                p = int(cargs.get("p", 1))
+                q = int(cargs.get("q", 0))
+                self.variational_params[tid] = nn.ParameterList([
+                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
+                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
+                ])
+                self.cov_modules[tid] = ARMACovariance(n_levels, n_slopes, p=p, q=q)
+
+            elif ctype in ["CS", "COMPOUND_SYMMETRY"]:
+                self.variational_params[tid] = nn.ParameterList([
+                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
+                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
+                ])
+                self.cov_modules[tid] = CompoundSymmetryCovariance(n_levels, n_slopes)
+
+            elif ctype in ["UN", "UNSTRUCTURED"]:
+                self.variational_params[tid] = nn.ParameterList([
+                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
+                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
+                ])
+                self.cov_modules[tid] = UnstructuredSlopeCovariance(n_levels, n_slopes)
+
+            elif ctype == "KRON":
+                self.variational_params[tid] = nn.ParameterList([
+                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
+                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
+                ])
+                K_group = cargs.get("K_group") or cargs.get("matrix_tensor")
+                K_slope = cargs.get("K_slope", None)
+                jitter = cargs.get("lambda_k", 1e-4)
+                if K_group is None:
+                    raise ValueError(f"KRON covariance for group {group_name} requires 'K_group'.")
+                self.cov_modules[tid] = KroneckerCovariance(
+                    n_levels=n_levels,
+                    n_slopes=n_slopes,
+                    K_group=K_group,
+                    K_slope=K_slope,
+                    jitter=jitter
+                )
+
+            elif ctype == "K":
+                # For K, we maintain variational params only for training levels; unseen levels are predicted via Henderson BLUP.
+                train_levels = cargs.get("train_levels", train_levels)
+                n_train_levels = len(train_levels)
+                self.variational_params[tid] = nn.ParameterList([
+                    nn.Parameter(torch.zeros(n_train_levels, n_slopes, embedding_dim)), # mu for train
+                    nn.Parameter(torch.ones(n_train_levels, n_slopes, embedding_dim) * -2.0) # log_s for train
+                ])
+                matrix_tensor = cargs.get("matrix_tensor", None)
+                all_levels = cargs.get("levels", train_levels)
+                lambda_k = cargs.get("lambda_k", 1e-4)
+                self.cov_modules[tid] = KCovariance(
+                    n_levels=n_levels,
+                    n_slopes=n_slopes,
+                    full_levels=all_levels,
+                    train_levels=train_levels,
+                    matrix_tensor=matrix_tensor,
+                    lambda_k=lambda_k
+                )
+
+            elif ctype == "GP":
+                train_levels = cargs.get("train_levels", train_levels)
+                all_levels = cargs.get("levels", train_levels)
+                coords = cargs.get("coords", None)
+                if coords is None:
+                    raise ValueError(f"GP covariance for group {group_name} requires 'coords'.")
+                n_train_levels = len(train_levels)
+                self.variational_params[tid] = nn.ParameterList([
+                    nn.Parameter(torch.zeros(n_train_levels, n_slopes, embedding_dim)), # mu for train
+                    nn.Parameter(torch.ones(n_train_levels, n_slopes, embedding_dim) * -2.0) # log_s for train
+                ])
+                lambda_k = cargs.get("lambda_k", 1e-4)
+                self.cov_modules[tid] = GPCovariance(
+                    n_levels=n_levels,
+                    n_slopes=n_slopes,
+                    full_levels=all_levels,
+                    train_levels=train_levels,
+                    coords=coords,
+                    lambda_k=lambda_k
+                )
+
+            else:
+                # Default: IID covariance
+                self.variational_params[tid] = nn.ParameterList([
+                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
+                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
+                ])
+                self.cov_modules[tid] = IIDCovariance(n_levels, n_slopes)
+
+            if self.unknown_strategy == "learned":
+                self.unknown_params[tid] = nn.Parameter(torch.zeros(1, n_slopes, embedding_dim))
+
+    def forward(self, X, Z_indices, Z_slopes):
+        # X: [batch, fixed_dim]
+        # Z_indices: list of [batch] indices
+        # Z_slopes: list of [batch, n_slopes]
+        
+        # Fixed part
+        fixed_out = self.fixed_linear(X)
+        
+        # Random parts
+        random_out = torch.zeros_like(fixed_out)
+        kl_sum = 0.0
+        kl_elems = 0
+        n_terms = max(len(self.config), 1)
+        
+        for i, term in enumerate(self.config):
+            tid = term['term_id']
+            indices = Z_indices[i] # [batch]
+            slopes_val = Z_slopes[i] # [batch, n_slopes]
+            
+            mu, log_s = self.variational_params[tid]
+            
+            # KL divergence: q(v) vs N(0, I)
+            s = torch.exp(log_s)
+            var = s**2
+            kl = 0.5 * (var + mu**2 - 1 - 2*log_s).sum()
+            kl_sum = kl_sum + kl
+            kl_elems += (mu.numel() + log_s.numel())
+            
+            if self.training:
+                noise = torch.randn_like(mu)
+                v_input = mu + noise * torch.exp(log_s)
+            else:
+                # Use mean at evaluation time for deterministic predictions
+                v_input = mu
+            
+            # Apply Covariance Structure L
+            cov_module = self.cov_modules[tid]
+            if isinstance(cov_module, (KCovariance, GPCovariance)):
+                u_expected = cov_module(v_input, indices)  # already [batch, slopes, emb]
+                if self.unknown_strategy == "learned":
+                    unknown_row = self.unknown_params[tid]
+                else:
+                    unknown_row = u_expected.mean(dim=0, keepdim=True)
+                if (indices == 0).any():
+                    u_expected = u_expected.clone()
+                    u_expected[indices == 0] = unknown_row
+                gathered_u = u_expected
+            else:
+                u_expected = cov_module(v_input) # [levels, slopes, emb]
+                # Reserve index 0 for unseen groups -> configurable strategy
+                if self.unknown_strategy == "learned":
+                    unknown_row = self.unknown_params[tid]
+                else:
+                    unknown_row = u_expected.mean(dim=0, keepdim=True)
+                u_padded = torch.cat([unknown_row, u_expected], dim=0)
+                gathered_u = u_padded.index_select(0, indices.clamp(min=0))
+            
+            # Weighted sum
+            term_contrib = (gathered_u * slopes_val.unsqueeze(-1)).sum(dim=1)
+            random_out += term_contrib
+            
+        kl_out = kl_sum / max(kl_elems, 1) if self.kl_normalize else kl_sum
+        random_out_scaled = random_out / n_terms if self.scale_random_by_terms else random_out
+        return fixed_out + random_out_scaled, kl_out
+
+    def get_variance_summary(self):
+        """
+        Returns a dict of term_id -> {slope_idx: sigma_value, type: cov_type}
+        """
+        summary = {}
+        for term_id, mod in self.cov_modules.items():
+            # Assume mod has log_sigma or similar
+            # IID and AR1 have log_sigma
+            # K has log_sigma
+            
+            # Access params directly? Or rely on convention.
+            vals = {}
+            if hasattr(mod, 'log_sigma'):
+                sigmas = torch.exp(mod.log_sigma).detach().cpu().numpy().flatten()
+                vals['sigmas'] = sigmas
+            
+            if hasattr(mod, 'raw_rho'): # AR1
+                rho = torch.tanh(mod.raw_rho).detach().cpu().numpy().flatten()
+                vals['rho'] = rho
+                
+            vals['type'] = mod.__class__.__name__
+            summary[term_id] = vals
+        return summary
 
 
 @dataclass
@@ -155,4 +399,4 @@ class MixedEffectsEncoder(nn.Module):
         )
 
 
-__all__ = ["MixedEffectsEncoder", "EncodedBatch"]
+__all__ = ["MixedEffectsEncoder", "EncodedBatch", "MixedEffectsRepresentation"]

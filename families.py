@@ -135,19 +135,27 @@ class NegBinomial(Family):
             log_mu = theta[:, 0]
             log_alpha = theta[:, 1]
         # Clamp to avoid overflow/underflow and keep gradients flowing.
-        from .constants import MIN_LOG_PARAM, MAX_LOG_PARAM, LARGE_PENALTY
+        from .constants import MIN_LOG_PARAM, MAX_LOG_PARAM, LARGE_PENALTY, EPSILON
         log_mu = torch.clamp(log_mu, min=MIN_LOG_PARAM, max=MAX_LOG_PARAM)
         log_alpha = torch.clamp(log_alpha, min=MIN_LOG_PARAM, max=MAX_LOG_PARAM)
 
-        mu = torch.exp(log_mu) + 1e-6
-        alpha = torch.exp(log_alpha) + 1e-6
+        mu = torch.exp(log_mu) + EPSILON
+        alpha = torch.exp(log_alpha) + EPSILON
 
         # NB2: r = 1/alpha, p = r/(r+mu)
         r = 1.0 / alpha
         p = r / (r + mu)
+        # Guard against boundary probs
+        p = torch.clamp(p, min=EPSILON, max=1.0 - EPSILON)
 
-        dist = torch.distributions.NegativeBinomial(total_count=r, probs=p)
-        nll = -dist.log_prob(y.squeeze()).mean()
+        try:
+            dist = torch.distributions.NegativeBinomial(total_count=r, probs=p)
+            nll = -dist.log_prob(y.squeeze()).mean()
+        except Exception as e:
+            self.logger.warning(
+                f"NegativeBinomial log_prob failed ({e}); returning large penalty."
+            )
+            return torch.tensor(LARGE_PENALTY, device=log_mu.device, dtype=log_mu.dtype)
 
         # ERROR RECOVERY: Return large penalty instead of crashing
         if torch.isnan(nll) or torch.isinf(nll):
@@ -411,3 +419,216 @@ class DiscreteTimeCompetingRisks(Family):
         cifs = torch.stack(cifs, dim=2)
         
         return cifs.detach().cpu().numpy()
+
+
+class MultivariateGaussian(Family):
+    """
+    Multivariate Gaussian family for correlated multi-task outcomes.
+    
+    Models: Y ~ N(μ, Σ)
+    
+    Σ can be:
+    - diagonal: Σ = diag(exp(log_var))
+    - low_rank: Σ = diag(exp(log_diag)) + V @ V^T
+    - full: Σ = L @ L^T (Cholesky)
+    """
+    def __init__(self, n_tasks, covariance_type='low_rank', covariance_rank=5):
+        super().__init__()
+        self.n_tasks = n_tasks
+        self.covariance_type = covariance_type
+        
+        # Mean component: μ
+        # Note: TabMixNN head produces μ directly
+        
+        # Covariance component: Σ
+        if covariance_type == 'diagonal':
+            self.log_var = nn.Parameter(torch.zeros(n_tasks))
+        elif covariance_type == 'low_rank':
+            self.log_diag = nn.Parameter(torch.zeros(n_tasks))
+            self.V = nn.Parameter(torch.randn(n_tasks, covariance_rank) * 0.1)
+        elif covariance_type == 'full':
+            self.L_raw = nn.Parameter(torch.eye(n_tasks))
+        else:
+            raise ValueError(f"Unknown covariance_type: {covariance_type}")
+
+    @property
+    def n_params(self):
+        # We only predict the mean μ through the neural network.
+        # Covariance parameters are global and learned as part of the family.
+        return self.n_tasks
+
+    def forward_params(self, eta):
+        # eta is [batch, n_tasks] -> mu
+        return eta
+
+    def get_covariance(self):
+        """Compute Σ from parameters."""
+        if self.covariance_type == 'diagonal':
+            return torch.diag(torch.exp(self.log_var))
+        elif self.covariance_type == 'low_rank':
+            D = torch.diag(torch.exp(self.log_diag))
+            return D + self.V @ self.V.T
+        elif self.covariance_type == 'full':
+            L = torch.tril(self.L_raw)
+            return L @ L.T + 1e-6 * torch.eye(self.n_tasks, device=L.device)
+        return torch.eye(self.n_tasks)
+
+    def nll(self, theta, y, **kwargs):
+        # theta is mu: [batch, n_tasks]
+        # y: [batch, n_tasks]
+        mu = theta
+        cov = self.get_covariance()
+        
+        # Using MultivariateNormal. Note: If covariance is large, this is slow.
+        # For low-rank, we could use Woodbury, but PyTorch's MultivariateNormal 
+        # is reasonably optimized for many cases.
+        try:
+            dist = torch.distributions.MultivariateNormal(mu, covariance_matrix=cov)
+            return -dist.log_prob(y).mean()
+        except ValueError:
+            # Fallback for numerical stability if cov becomes non-PSD
+            from .constants import EPSILON, LARGE_PENALTY
+            jitter = EPSILON * torch.eye(self.n_tasks, device=cov.device)
+            try:
+                dist = torch.distributions.MultivariateNormal(mu, covariance_matrix=cov + jitter)
+                return -dist.log_prob(y).mean()
+            except:
+                return torch.tensor(LARGE_PENALTY, device=mu.device)
+
+    def predict(self, theta, mode="default", **kwargs):
+        # Returns mu
+        return theta.detach().cpu().numpy()
+
+
+class MultiLabelBinomial(Family):
+    """
+    Multi-label binomial family for independent binary tasks.
+    """
+    def __init__(self, n_labels: int):
+        super().__init__()
+        self.n_labels = n_labels
+
+    @property
+    def n_params(self):
+        return self.n_labels
+
+    def forward_params(self, eta):
+        return eta
+
+    def nll(self, theta, y, **kwargs):
+        # theta are logits: [batch, n_labels]
+        # y: [batch, n_labels]
+        return F.binary_cross_entropy_with_logits(theta, y.float(), reduction='mean')
+
+    def predict(self, theta, mode="default", **kwargs):
+        probs = torch.sigmoid(theta)
+        if mode == "proba":
+            return probs.detach().cpu().numpy()
+        return (probs > 0.5).long().detach().cpu().numpy()
+
+
+class ContinuousSurvival(Family):
+    """
+    Continuous-time survival family.
+    Currently supports Weibull parametric hazard.
+    
+    Hazard: h(t; λ, k) = (k/λ) * (t/λ)^(k-1)
+    S(t; λ, k) = exp(-(t/λ)^k)
+    f(t; λ, k) = h(t) * S(t)
+    
+    Log-likelihood (observed): log(h(t)) + log(S(t))
+    Log-likelihood (censored): log(S(t))
+    """
+    def __init__(self, init_log_shape=0.0, init_log_scale=0.0):
+        super().__init__()
+        # Global learned baseline parameters (Weibull baseline)
+        self.log_shape = nn.Parameter(torch.tensor(init_log_shape)) # log k
+        self.log_scale = nn.Parameter(torch.tensor(init_log_scale)) # log λ_baseline
+
+    @property
+    def n_params(self):
+        # We predict a per-sample log-hazard ratio (log_hr)
+        # λ_i = λ_baseline * exp(-log_hr / k)  # This makes h(t) = h0(t) * exp(log_hr)
+        return 1
+
+    def forward_params(self, eta):
+        # eta is log_hr: [batch, 1]
+        return eta.squeeze(-1)
+
+    def nll(self, theta, y, **kwargs):
+        # theta is log_hr: [batch]
+        # y is [batch, 2] -> [time, event]
+        t = y[:, 0]
+        d = y[:, 1]
+        
+        k = torch.exp(self.log_shape)
+        # log_hr shifts the hazard: h(t) = h0(t) * exp(theta)
+        # Weibull h0(t) = (k/λ) * (t/λ)^{k-1}
+        # Weibull H0(t) = (t/λ)^k
+        
+        # We model λ_i such that exp(theta) scales the hazard and cumulative hazard:
+        # H_i(t) = H0(t) * exp(theta) = (t/λ)^k * exp(theta)
+        # log H_i(t) = k(log t - log λ) + theta
+        
+        log_lambda = self.log_scale
+        
+        # Log-cumulative hazard: log H(t)
+        log_H = k * (torch.log(t + 1e-8) - log_lambda) + theta
+        H = torch.exp(log_H)
+        
+        # Log-hazard: log h(t) = log(k/t) + log H(t)
+        log_h = torch.log(k + 1e-8) - torch.log(t + 1e-8) + log_H
+        
+        # NLL = -sum( d_i * log h(t_i) - H(t_i) )
+        log_like = d * log_h - H
+        return -log_like.mean()
+
+    def predict(self, theta, mode="survival", **kwargs):
+        # theta is log_hr
+        # return S(t) at specified times in kwargs['times']
+        times = kwargs.get('times')
+        if times is None:
+            return theta.detach().cpu().numpy()
+        
+        if isinstance(times, (list, np.ndarray)):
+            times = torch.tensor(times, device=theta.device, dtype=theta.dtype)
+            
+        # [batch, 1, 1] vs [1, n_times, 1] ...
+        # Let's just return median survival if no times provided
+        if mode == "median":
+             # S(t) = 0.5 => H(t) = -log(0.5) = log 2
+             # (t/λ)^k * exp(theta) = log 2
+             # t/λ = (log 2 / exp(theta))^(1/k)
+             # t = λ * (log 2 * exp(-theta))^(1/k)
+             k = torch.exp(self.log_shape)
+             lam = torch.exp(self.log_scale)
+             median = lam * (np.log(2) * torch.exp(-theta))**(1/k)
+             return median.detach().cpu().numpy()
+             
+        return theta.detach().cpu().numpy()
+
+class Multinomial(Family):
+    """
+    Multinomial (Categorical) family for multi-class classification.
+    """
+    def __init__(self, n_classes):
+        super().__init__()
+        self.n_classes = n_classes
+
+    @property
+    def n_params(self):
+        return self.n_classes
+
+    def forward_params(self, eta):
+        # eta is [batch, n_classes] logits
+        return eta
+
+    def nll(self, theta, y, **kwargs):
+        # theta is logits, y is labels [batch]
+        return F.cross_entropy(theta, y.long())
+
+    def predict(self, theta, mode="default", **kwargs):
+        # theta is logits
+        if mode == "proba":
+            return F.softmax(theta, dim=-1).detach().cpu().numpy()
+        return torch.argmax(theta, dim=-1).detach().cpu().numpy()

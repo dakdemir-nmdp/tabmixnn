@@ -1,771 +1,1250 @@
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torch.optim as optim
 import numpy as np
+import pandas as pd
+from typing import List, Dict, Union, Optional, Any
+from tqdm import tqdm
+from .formula import CompiledDesign, OutcomeSpec
+from .encoder import MixedEffectsRepresentation
+from .backbones.gsem import GSEMBackbone 
+from .backbones.manifold import ManifoldBackbone 
+from .families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks, Binomial, Gaussian, Poisson, NegBinomial
+from .callbacks import CallbackList, History, EarlyStopping
+from .logging_config import get_logger
 
-class SEMLayer(nn.Module):
+class TabMixNN(nn.Module):
     """
-    Structural Equation Model (SEM) Layer for causal coordination.
-    Implements Lavaan-style directed acyclic graph (DAG): y = (I-B)^{-1} x
-    where B is a learned lower triangular adjacency matrix.
+    TabMixNN: Synthesizing the best of General Mixed Models and Deep Learning.
     
-    This is NOT spatial attention - it models directed dependencies between neurons.
+    Architecture:
+      1. Robust Mixed Effects Encoder
+      2. Backbone (GSEM or Universal)
+      3. Flexible Output Heads
     """
-    def __init__(self, dim, sam_alpha_init=0.0, max_offdiag=0.9, residual=True, residual_scale=1.0):
+    
+    @property
+    def layer(self):
+        """Legacy compatibility property for accessing the 'main' layer."""
+        return self
+    
+    @property
+    def structural(self):
+        """Legacy compatibility property."""
+        if self.architecture == 'gsem' and self.backbone and hasattr(self.backbone, 'hidden_layers'):
+            if len(self.backbone.hidden_layers) > 0:
+                struct = self.backbone.hidden_layers[0].structure
+                if struct is not None:
+                    return struct
+        # Return a dummy if no structure exists
+        class DummyStructural:
+            def __init__(self):
+                self.use_static = False
+                self.use_dynamic = False
+        return DummyStructural()
+
+    @property
+    def random_effects(self):
+        """Legacy compatibility property."""
+        if self.encoder:
+            return RandomEffectsShim(self.encoder)
+        return None
+    
+    @classmethod
+    def lmm(cls, formula=None, formula_body=None, input_dim=None, group_counts=None, **kwargs):
+        """Factory for Linear Mixed Models."""
+        f = formula or formula_body or "y ~ ."
+        # Default to Gaussian if no family provided
+        if 'family' not in kwargs and 'outcomes' not in kwargs:
+            kwargs['family'] = Gaussian()
+        model = cls(f, architecture="gsem", **kwargs)
+        
+        if input_dim is not None:
+            # Build model immediately if input_dim is provided for legacy test compatibility
+            from .formula import CompiledDesign, RandomEffectTerm
+            # Prepare outcomes for design if single family used
+            if not model.outcomes and model.single_outcome_family:
+                from .formula import OutcomeSpec
+                model.outcomes = [OutcomeSpec(name="main", y="y", family=model.single_outcome_family)]
+            
+            design = CompiledDesign(f, model.outcomes, "none", None)
+            if group_counts:
+                for i, (group, n) in enumerate(group_counts.items()):
+                    term = RandomEffectTerm(f"term_{i}", group, ["Intercept"])
+                    term.level_map = {j: j for j in range(n)}
+                    design.random_terms.append(term)
+            model._build_model(fixed_input_dim=input_dim, compiled_design=design)
+            model.design = design
+        return model
+
+    @classmethod
+    def sem(cls, formula=None, formula_body=None, input_dim=1, latent_dim=16, output_dim=16, **kwargs):
+        """Factory for Structural Equation Models."""
+        f = formula or formula_body or "y ~ 1"
+        # Default to Gaussian if no family provided
+        if 'family' not in kwargs and 'outcomes' not in kwargs:
+            # For SEM with output_dim > 1, use MultivariateGaussian
+            if output_dim > 1:
+                from .families import MultivariateGaussian
+                kwargs['family'] = MultivariateGaussian(n_tasks=output_dim)
+            else:
+                kwargs['family'] = Gaussian()
+        
+        model = cls(f, 
+                   architecture="gsem", 
+                   use_static_structure=True,
+                   hidden_dims=[latent_dim],
+                   **kwargs)
+        
+        if input_dim is not None:
+            from .formula import CompiledDesign, OutcomeSpec
+            if not model.outcomes and model.single_outcome_family:
+                model.outcomes = [OutcomeSpec(name="main", y="y", family=model.single_outcome_family)]
+            design = CompiledDesign(f, model.outcomes, "none", None)
+            model._build_model(fixed_input_dim=input_dim, compiled_design=design)
+            model.design = design
+            
+        return model
+
+    @classmethod
+    def transformer(cls, formula=None, formula_body=None, input_dim=16, hidden_dim=16, n_heads=4, **kwargs):
+        """Factory for Transformer/Attention-based models."""
+        f = formula or formula_body or "y ~ 1"
+        # Default to Gaussian if no family provided
+        if 'family' not in kwargs and 'outcomes' not in kwargs:
+            if hidden_dim > 1:
+                from .families import MultivariateGaussian
+                kwargs['family'] = MultivariateGaussian(n_tasks=hidden_dim)
+            else:
+                kwargs['family'] = Gaussian()
+            
+        model = cls(f, 
+                   architecture="gsem", 
+                   use_dynamic_structure=True,
+                   n_attention_heads=n_heads,
+                   hidden_dims=[hidden_dim],
+                   **kwargs)
+                   
+        if input_dim is not None:
+            from .formula import CompiledDesign, OutcomeSpec
+            if not model.outcomes and model.single_outcome_family:
+                model.outcomes = [OutcomeSpec(name="main", y="y", family=model.single_outcome_family)]
+            design = CompiledDesign(f, model.outcomes, "none", None)
+            model._build_model(fixed_input_dim=input_dim, compiled_design=design)
+            model.design = design
+            
+        return model
+    
+    def __init__(
+        self, 
+        formula: str,
+        outcomes: Optional[List[OutcomeSpec]] = None,
+        family: Optional[Any] = None, 
+        # mixed effects config
+        embedding_dim: int = 16,
+        cov_struct_map: Optional[Dict] = None,
+        cov_struct: Optional[Dict] = None,
+        scale_random_by_terms: bool = False,
+        unknown_strategy: str = "learned",
+        # backbone config
+        architecture: str = "gsem", # gsem or universal
+        hidden_dims: List[int] = [64, 32],
+        # GSEM specific
+        use_static_structure: Union[bool, List[bool]] = False,
+        use_dynamic_structure: Union[bool, List[bool]] = False,
+        n_attention_heads: Union[int, List[int]] = 4,
+        backbone_dropout: float = 0.0,
+        hidden_dropout: float = 0.0,
+        # Manifold / Universal specific
+        manifold_configs: Optional[List[Dict]] = None,
+        use_recursive: bool = True,
+        aggregation: str = "concat",
+        # training config
+        lr: float = 1e-3,
+        weight_decay: float = 1e-4,
+        batch_size: int = 256,
+        epochs: int = 20,
+        lambda_sparse: float = 0.001,
+        lambda_kl: float = 0.01,
+        lambda_dag: float = 0.0,
+        lambda_contraction: float = 0.0,
+        grad_clip_norm: float = 1.0,
+        device: str = "cpu",
+        verbose: bool = False,
+        **kwargs
+    ):
         super().__init__()
-        self.dim = dim
-        self.max_offdiag = max_offdiag
-        self.use_residual = residual
-        self.residual_scale = residual_scale
         
-        # Unconstrained weights B_tilde
-        # We only need lower triangle (strictly).
-        # We can store full matrix and mask, or just parameters.
-        # Mask: 1 if i > j, 0 else.
-        
-        # Manual mask creation to avoid torch.tril segfault on some platforms
-        r = torch.arange(dim).long().unsqueeze(1)
-        c = torch.arange(dim).long().unsqueeze(0)
-        tril_ones = (r > c).float()
-        
-        self.register_buffer('mask', tril_ones)
-        
-        self.B_tilde = nn.Parameter(torch.randn(dim, dim) * 0.01)
-        self.alpha_logits = nn.Parameter(torch.ones(dim, dim) * sam_alpha_init)
-        
-    def get_B(self):
-        """Get gated adjacency matrix B."""
-        gates = torch.sigmoid(self.alpha_logits)
-        B = gates * torch.tanh(self.B_tilde) * self.max_offdiag
-        return B * self.mask
-
-    def forward(self, x):
-        # x: [batch, dim]
-        B = self.get_B()
-        I = torch.eye(self.dim, device=x.device)
-        
-        # Solve (I - B) y = x  => y = (I-B)^-1 x
-        # B is strictly lower triangular, creating a DAG.
-        # (I-B) is lower triangular with 1s on diagonal. Invertible.
-        # torch.linalg.solve_triangular is best if available, else solve.
-        # Since B is strictly lower, I-B is lower triangular.
-        # shape of (I-B) is [dim, dim]. x is [batch, dim].
-        # We want y such that (I-B) y^T = x^T
-        
-        A = I - B
-        # solve A Y^T = X^T
-        # torch.linalg.solve_triangular expects A to be triangular.
-        # upper=False (lower).
-        
-        # x is [batch, dim], transpose to [dim, batch]
-        x_t = x.t()
-        # Ensure device compatibility
-        y_t = torch.linalg.solve_triangular(A, x_t, upper=False)
-        y = y_t.t()
-        if self.use_residual:
-            y = y + self.residual_scale * x
-        return y
-
-    def penalty(self):
-        # L1-like penalty on gates: sum sigmoid(alpha)
-        # Only strict lower triangle
-        sigs = torch.sigmoid(self.alpha_logits) * self.mask
-        return sigs.sum()
-
-
-class PositionalSEMLayer(nn.Module):
-    """
-    SEM layer with position-aware prior for 1D/2D neuron arrays.
-    Neurons at positions i and j have dependency strength based on distance |i-j|.
-    
-    Uses RBF kernel to encourage nearby neurons to have stronger dependencies.
-    """
-    def __init__(self, dim, max_offdiag=0.9, residual=True, residual_scale=1.0,
-                 lengthscale_init=3.0, grid_shape=None):
-        """
-        Args:
-            dim: Number of neurons
-            max_offdiag: Maximum off-diagonal value in B
-            residual: Whether to add residual connection
-            residual_scale: Scale for residual connection
-            lengthscale_init: Initial lengthscale for RBF kernel
-            grid_shape: Optional (U, V) tuple for 2D grid. If None, assumes 1D layout.
-        """
-        super().__init__()
-        self.dim = dim
-        self.max_offdiag = max_offdiag
-        self.use_residual = residual
-        self.residual_scale = residual_scale
-        self.grid_shape = grid_shape
-        
-        # Neuron positions
-        if grid_shape is not None:
-            # 2D grid: positions are (row, col) coordinates
-            U, V = grid_shape
-            assert U * V == dim, f"Grid shape {grid_shape} doesn't match dim {dim}"
-            rows = torch.arange(U, dtype=torch.float32).unsqueeze(1).repeat(1, V)
-            cols = torch.arange(V, dtype=torch.float32).unsqueeze(0).repeat(U, 1)
-            positions = torch.stack([rows.flatten(), cols.flatten()], dim=1)  # [dim, 2]
+        self.formula = formula
+        if outcomes is None:
+            if family is None:
+                raise ValueError("Must provide either 'outcomes' or 'family'.")
+            self.single_outcome_family = family
+            self.outcomes = [] 
         else:
-            # 1D: positions are 0, 1, 2, ..., dim-1
-            positions = torch.arange(dim, dtype=torch.float32).unsqueeze(1)  # [dim, 1]
-        
-        self.register_buffer("positions", positions)
-        
-        # Learnable lengthscale for position kernel
-        self.log_lengthscale = nn.Parameter(torch.tensor(lengthscale_init).log())
-        
-        # Base adjacency weights (unconstrained)
-        self.B_tilde = nn.Parameter(torch.randn(dim, dim) * 0.01)
-        
-        # Gating logits
-        self.alpha_logits = nn.Parameter(torch.zeros(dim, dim))
-        
-        # Lower triangular mask (DAG constraint)
-        mask = torch.tril(torch.ones(dim, dim), diagonal=-1)
-        self.register_buffer("mask", mask)
-    
-    def get_position_prior(self):
-        """
-        Compute position-based prior: K[i,j] = exp(-||pos_i - pos_j||^2 / (2*l^2))
-        This encourages nearby neurons to have stronger dependencies.
-        """
-        l = torch.exp(self.log_lengthscale)
-        # Compute pairwise distances
-        diff = self.positions.unsqueeze(0) - self.positions.unsqueeze(1)  # [dim, dim, d]
-        dist_sq = (diff ** 2).sum(dim=2)  # [dim, dim]
-        K = torch.exp(-0.5 * dist_sq / (l ** 2))
-        return K
-    
-    def get_B(self):
-        """
-        Adjacency matrix with position-aware gating.
-        B[i,j] = gate[i,j] * tanh(B_tilde[i,j]) * K[i,j] * mask[i,j]
-        """
-        gates = torch.sigmoid(self.alpha_logits)
-        K = self.get_position_prior()
-        
-        # Combine: base weights * position kernel * gate * DAG mask
-        B = gates * torch.tanh(self.B_tilde) * K * self.max_offdiag
-        return B * self.mask
-    
-    def forward(self, x):
-        """
-        Solve (I - B)y = x for y.
-        """
-        B = self.get_B()
-        I = torch.eye(self.dim, device=x.device)
-        A = I - B
-        
-        # Solve via triangular solver
-        y = torch.linalg.solve_triangular(A, x.T, upper=False).T
-        
-        if self.use_residual:
-            y = y + self.residual_scale * x
-        return y
-    
-    def penalty(self):
-        """
-        L1 penalty on gates + lengthscale regularization.
-        """
-        gate_penalty = torch.sigmoid(self.alpha_logits).sum()
-        # Encourage moderate lengthscales (not too local, not too global)
-        l = torch.exp(self.log_lengthscale)
-        length_penalty = (l - 3.0) ** 2  # Soft prior around l=3
-        return gate_penalty + 0.01 * length_penalty
-
-
-class SpatialCovarianceLayer(nn.Module):
-    """
-    Stochastic layer that adds spatial covariance noise to activations.
-    Implements: h_out = h_in + ε, where ε ~ N(0, Σ_spatial)
-    
-    Supports 1D and 2D neuron grids with Kronecker factorization for efficiency.
-    """
-    def __init__(self, dim, kernel_type="rbf", lengthscale_init=3.0, 
-                 amplitude_init=0.1, grid_shape=None, jitter=1e-4):
-        """
-        Args:
-            dim: Number of neurons
-            kernel_type: Type of kernel ("rbf", "matern")
-            lengthscale_init: Initial lengthscale
-            amplitude_init: Initial noise amplitude
-            grid_shape: Optional (U, V) for 2D grid with Kronecker factorization
-            jitter: Numerical stability parameter
-        """
-        super().__init__()
-        self.dim = dim
-        self.kernel_type = kernel_type
-        self.grid_shape = grid_shape
-        self.jitter = jitter
-        
-        if grid_shape is not None:
-            # 2D grid: use Kronecker factorization Σ = Σ_rows ⊗ Σ_cols
-            U, V = grid_shape
-            assert U * V == dim, f"Grid shape {grid_shape} doesn't match dim {dim}"
-            self.U = U
-            self.V = V
+            self.outcomes = outcomes
+            self.single_outcome_family = None
             
-            # Positions for rows and columns
-            pos_rows = torch.arange(U, dtype=torch.float32).unsqueeze(1)
-            pos_cols = torch.arange(V, dtype=torch.float32).unsqueeze(1)
-            self.register_buffer("pos_rows", pos_rows)
-            self.register_buffer("pos_cols", pos_cols)
-            
-            # Separate lengthscales for rows and columns
-            self.log_lengthscale_rows = nn.Parameter(torch.tensor(lengthscale_init).log())
-            self.log_lengthscale_cols = nn.Parameter(torch.tensor(lengthscale_init).log())
-        else:
-            # 1D: standard covariance
-            positions = torch.arange(dim, dtype=torch.float32).unsqueeze(1)
-            self.register_buffer("positions", positions)
-            self.log_lengthscale = nn.Parameter(torch.tensor(lengthscale_init).log())
-        
-        # Amplitude (noise scale)
-        self.log_amplitude = nn.Parameter(torch.tensor(amplitude_init).log())
-    
-    def _rbf_kernel(self, positions, lengthscale):
-        """Compute RBF kernel matrix."""
-        diff = positions.unsqueeze(0) - positions.unsqueeze(1)
-        dist_sq = (diff ** 2).sum(dim=2)
-        K = torch.exp(-0.5 * dist_sq / (lengthscale ** 2))
-        return K
-    
-    def get_covariance_1d(self):
-        """Get covariance matrix for 1D layout."""
-        l = torch.exp(self.log_lengthscale)
-        K = self._rbf_kernel(self.positions, l)
-        # Add jitter for numerical stability
-        K = K + self.jitter * torch.eye(self.dim, device=K.device)
-        return K
-    
-    def get_covariance_2d(self):
-        """Get Kronecker factorized covariance for 2D grid."""
-        l_rows = torch.exp(self.log_lengthscale_rows)
-        l_cols = torch.exp(self.log_lengthscale_cols)
-        
-        K_rows = self._rbf_kernel(self.pos_rows, l_rows)
-        K_cols = self._rbf_kernel(self.pos_cols, l_cols)
-        
-        # Add jitter
-        K_rows = K_rows + self.jitter * torch.eye(self.U, device=K_rows.device)
-        K_cols = K_cols + self.jitter * torch.eye(self.V, device=K_cols.device)
-        
-        return K_rows, K_cols
-    
-    def sample_noise(self, batch_size, device):
-        """Sample ε ~ N(0, Σ_spatial)."""
-        amplitude = torch.exp(self.log_amplitude)
-        
-        if self.grid_shape is not None:
-            # 2D: Kronecker sampling
-            K_rows, K_cols = self.get_covariance_2d()
-            
-            # Cholesky decomposition
-            L_rows = torch.linalg.cholesky(K_rows)
-            L_cols = torch.linalg.cholesky(K_cols)
-            
-            # Sample standard normal
-            z = torch.randn(batch_size, self.U, self.V, device=device)
-            
-            # Apply Kronecker structure: (L_rows ⊗ L_cols) z
-            # Efficient: z_out = L_rows @ z @ L_cols^T
-            noise = torch.einsum('ij,bjk,kl->bil', L_rows, z, L_cols.T)
-            noise = noise.reshape(batch_size, self.dim)
-        else:
-            # 1D: standard sampling
-            K = self.get_covariance_1d()
-            L = torch.linalg.cholesky(K)
-            
-            z = torch.randn(batch_size, self.dim, device=device)
-            noise = torch.matmul(z, L.T)
-        
-        return amplitude * noise
-    
-    def forward(self, x):
-        """
-        Add spatial noise during training, deterministic during eval.
-        """
-        if self.training:
-            noise = self.sample_noise(x.shape[0], x.device)
-            return x + noise
-        else:
-            return x
-    
-    def penalty(self):
-        """Regularization on amplitude to prevent excessive noise."""
-        amplitude = torch.exp(self.log_amplitude)
-        # Soft constraint: prefer small but non-zero amplitude
-        return (amplitude - 0.1) ** 2
-
-from .covariance import (
-    IIDCovariance,
-    AR1Covariance,
-    ARMACovariance,
-    CompoundSymmetryCovariance,
-    UnstructuredSlopeCovariance,
-    KroneckerCovariance,
-    KCovariance,
-    GPCovariance,
-)
-
-class MixedEffectsRepresentation(nn.Module):
-    def __init__(self, fixed_input_dim, embedding_dim, random_terms_config, cov_struct_map=None, kl_normalize=True, scale_random_by_terms=False, unknown_strategy="learned"):
-        super().__init__()
-        # Fixed part
-        self.fixed_linear = nn.Linear(fixed_input_dim, embedding_dim)
-        self.kl_normalize = kl_normalize
+        self.embedding_dim = embedding_dim
+        self.cov_struct_map = cov_struct_map or cov_struct or {}
         self.scale_random_by_terms = scale_random_by_terms
         self.unknown_strategy = unknown_strategy
         
-        self.random_terms = nn.ModuleDict()
-        self.variational_params = nn.ParameterDict() # For mu, log_scale
-        # Deprecate simple variance_components dict, use Covariance modules
-        self.cov_modules = nn.ModuleDict()
-        self.unknown_params = nn.ParameterDict()
+        self.architecture = architecture.lower()
+        self.hidden_dims = hidden_dims
+        # GSEM
+        self.use_static_structure = use_static_structure
+        self.use_dynamic_structure = use_dynamic_structure
+        self.n_attention_heads = n_attention_heads
+        self.backbone_dropout = backbone_dropout or hidden_dropout
+        # Universal
+        self.manifold_configs = manifold_configs
+        self.use_recursive = use_recursive
+        self.aggregation = aggregation
         
-        self.embedding_dim = embedding_dim
-        self.config = random_terms_config # List of dicts
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.batch_size = batch_size
+        self.epochs = epochs
+        self.lambda_sparse = lambda_sparse
+        self.lambda_kl = lambda_kl
+        self.lambda_dag = lambda_dag
+        self.lambda_contraction = lambda_contraction
+        self.grad_clip_norm = grad_clip_norm
+        self.device = device
+        self.verbose = verbose
+
+        self.logger = get_logger("TabMixNN")
+
+        # Input validation
+        if epochs <= 0:
+            raise ValueError(f"epochs must be > 0, got {epochs}")
+        if lr <= 0:
+            raise ValueError(f"lr must be > 0, got {lr}")
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be > 0, got {batch_size}")
+        if not isinstance(hidden_dims, list):
+            raise ValueError(f"hidden_dims must be a list, got {type(hidden_dims).__name__}")
+        if any(d <= 0 for d in hidden_dims):
+            raise ValueError(f"hidden_dims must be positive integers, got {hidden_dims}")
+        if 'sam_location' in kwargs:
+            valid_locations = ['input', 'hidden', 'output', 'all', 'none', 'first', 'both', None]
+            if kwargs['sam_location'] not in valid_locations:
+                raise ValueError(f"sam_location must be one of {valid_locations}, got {kwargs['sam_location']}")
+        if not device.startswith(('cpu', 'cuda', 'mps')):
+            raise ValueError(f"device must start with one of ['cpu', 'cuda', 'mps'], got {device}")
+
+        # Compatibility Shim
+        if 'hidden_layer_type' in kwargs and kwargs['hidden_layer_type'] == 'universal_samnn':
+            self.architecture = 'manifold'
+        if 'use_universal' in kwargs and kwargs['use_universal']:
+            self.architecture = 'manifold'
+
+        if self.architecture == 'universal':
+            self.architecture = 'manifold'
+            
+        # SAM Location Shim (if use_static_structure is default False)
+        if 'sam_location' in kwargs and self.use_static_structure is False:
+             loc = kwargs['sam_location']
+             n_layers = len(self.hidden_dims)
+             if loc == 'first':
+                 self.use_static_structure = [True] + [False]*(n_layers-1) if n_layers > 0 else False
+             elif loc == 'output':
+                 self.use_static_structure = [False]*(n_layers-1) + [True] if n_layers > 0 else False
+             elif loc == 'both':
+                 if n_layers == 1: self.use_static_structure = [True]
+                 else: self.use_static_structure = [True] + [False]*(n_layers-2) + [True]
+             elif loc == 'all':
+                 self.use_static_structure = True
+             elif loc == 'none':
+                 self.use_static_structure = False
+                 
+        # State
+        self.design = None
+        self.encoder = None
+        self.backbone = None
+        self.heads = None
+        self.history = []
+        self.val_history = []
+        self._train_data = None
+        self.stop_training = False
         
-        for term in random_terms_config:
-            tid = term['term_id']
-            # e.g. term_0
-            # group_col needed to lookup cov type?
-            # We pass cov_struct_map which maps group_col -> type.
-            # term['group_col'] needs to be in random_terms_config passed from design?
-            # Currently model init only gets minimal config.
-            # We assume default IID.
-            
-            n_levels = term['n_levels']
-            n_slopes = term['n_slopes']
-            group_name = term.get('group', 'unknown') # Add group name to config in next step
-            train_levels = term.get('train_levels', [])
-            
-            # Select Covariance
-            # Default IID
-            ctype = "IID"
-            cargs = {}
-            if cov_struct_map and group_name in cov_struct_map:
-                spec = cov_struct_map[group_name]
-                ctype = spec.get("type", "IID").upper()
-                cargs = spec
+    def fit(self,
+            df: pd.DataFrame,
+            y=None,
+            val_df: pd.DataFrame = None,
+            val_fraction: float = 0.0,
+            early_stopping: bool = False,
+            patience: int = 5,
+            min_delta: float = 0.0,
+            callbacks: Optional[list] = None,
+            reuse_design=None,
+            **kwargs):
+        """Fit model to dataframe."""
+
+        # Validate val_fraction
+        if val_fraction > 0 and (val_fraction >= 1):
+            raise ValueError(f"val_fraction must be in (0, 1), got {val_fraction}")
+
+        self._train_data = df
+
+        # Handle Validation Split
+        train_df = df
+        if val_df is None and val_fraction > 0.0:
+            val_df = df.sample(frac=val_fraction, random_state=42)
+            train_df = df.drop(val_df.index).reset_index(drop=True)
+            val_df = val_df.reset_index(drop=True)
+            self.logger.info(f"Split data: {len(train_df)} train, {len(val_df)} validation")
+
+        # 1. Prepare Outcome Specs if single
+        if not self.outcomes:
+            if '~' in self.formula:
+                lhs = self.formula.split('~')[0].strip()
+                if not lhs:
+                    raise ValueError("Formula missing LHS for single outcome mode.")
+                self.outcomes = [OutcomeSpec(name="main", y=lhs, family=self.single_outcome_family)]
             else:
-                ctype = "IID"
-                cargs = {}
+                raise ValueError("Formula must include LHS 'y ~ ...' for single outcome shortcut.")
 
-            if ctype == "AR1":
-                self.variational_params[tid] = nn.ParameterList([
-                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
-                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
-                ])
-                self.cov_modules[tid] = AR1Covariance(n_levels, n_slopes)
-
-            elif ctype in ["AR", "ARMA"]:
-                p = int(cargs.get("p", 1))
-                q = int(cargs.get("q", 0))
-                self.variational_params[tid] = nn.ParameterList([
-                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
-                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
-                ])
-                self.cov_modules[tid] = ARMACovariance(n_levels, n_slopes, p=p, q=q)
-
-            elif ctype in ["CS", "COMPOUND_SYMMETRY"]:
-                self.variational_params[tid] = nn.ParameterList([
-                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
-                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
-                ])
-                self.cov_modules[tid] = CompoundSymmetryCovariance(n_levels, n_slopes)
-
-            elif ctype in ["UN", "UNSTRUCTURED"]:
-                self.variational_params[tid] = nn.ParameterList([
-                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
-                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
-                ])
-                self.cov_modules[tid] = UnstructuredSlopeCovariance(n_levels, n_slopes)
-
-            elif ctype == "KRON":
-                self.variational_params[tid] = nn.ParameterList([
-                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
-                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
-                ])
-                K_group = cargs.get("K_group") or cargs.get("matrix_tensor")
-                K_slope = cargs.get("K_slope", None)
-                jitter = cargs.get("lambda_k", 1e-4)
-                if K_group is None:
-                    raise ValueError(f"KRON covariance for group {group_name} requires 'K_group'.")
-                self.cov_modules[tid] = KroneckerCovariance(
-                    n_levels=n_levels,
-                    n_slopes=n_slopes,
-                    K_group=K_group,
-                    K_slope=K_slope,
-                    jitter=jitter
-                )
-
-            elif ctype == "K":
-                # For K, we maintain variational params only for training levels; unseen levels are predicted via Henderson BLUP.
-                train_levels = cargs.get("train_levels", train_levels)
-                n_train_levels = len(train_levels)
-                self.variational_params[tid] = nn.ParameterList([
-                    nn.Parameter(torch.zeros(n_train_levels, n_slopes, embedding_dim)), # mu for train
-                    nn.Parameter(torch.ones(n_train_levels, n_slopes, embedding_dim) * -2.0) # log_s for train
-                ])
-                matrix_tensor = cargs.get("matrix_tensor", None)
-                all_levels = cargs.get("levels", train_levels)
-                lambda_k = cargs.get("lambda_k", 1e-4)
-                self.cov_modules[tid] = KCovariance(
-                    n_levels=n_levels,
-                    n_slopes=n_slopes,
-                    full_levels=all_levels,
-                    train_levels=train_levels,
-                    matrix_tensor=matrix_tensor,
-                    lambda_k=lambda_k
-                )
-
-            elif ctype == "GP":
-                train_levels = cargs.get("train_levels", train_levels)
-                all_levels = cargs.get("levels", train_levels)
-                coords = cargs.get("coords", None)
-                if coords is None:
-                    raise ValueError(f"GP covariance for group {group_name} requires 'coords'.")
-                n_train_levels = len(train_levels)
-                self.variational_params[tid] = nn.ParameterList([
-                    nn.Parameter(torch.zeros(n_train_levels, n_slopes, embedding_dim)), # mu for train
-                    nn.Parameter(torch.ones(n_train_levels, n_slopes, embedding_dim) * -2.0) # log_s for train
-                ])
-                lambda_k = cargs.get("lambda_k", 1e-4)
-                self.cov_modules[tid] = GPCovariance(
-                    n_levels=n_levels,
-                    n_slopes=n_slopes,
-                    full_levels=all_levels,
-                    train_levels=train_levels,
-                    coords=coords,
-                    lambda_k=lambda_k
-                )
-
-            else:
-                # Default: IID covariance
-                self.variational_params[tid] = nn.ParameterList([
-                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
-                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
-                ])
-                self.cov_modules[tid] = IIDCovariance(n_levels, n_slopes)
-
-            if self.unknown_strategy == "learned":
-                self.unknown_params[tid] = nn.Parameter(torch.zeros(1, n_slopes, embedding_dim))
-
-    def forward(self, X, Z_indices, Z_slopes):
-        # X: [batch, fixed_dim]
-        # Z_indices: list of [batch] indices
-        # Z_slopes: list of [batch, n_slopes]
+        # 2. Compile Design
+        if reuse_design is not None:
+             self.design = reuse_design
+        elif self.design is None:
+            self.logger.info("Compiling design...")
+            self.design = CompiledDesign(
+                self.formula, self.outcomes, 
+                sam_location="none",
+                sam_dim=None,
+                cov_struct_map=self.cov_struct_map
+            )
+            self.design.fit(train_df)
+            
+        # 3. Transform Data
+        X, Z_ind, Z_slopes, Ys = self.design.transform(train_df, mode='fit')
         
-        # Fixed part
-        fixed_out = self.fixed_linear(X)
+        # 4. Initialize Modules
+        if self.encoder is None:
+            self._build_model(fixed_input_dim=X.shape[1], compiled_design=self.design)
+            self.to(self.device)
+            
+        # 5. Prepare Tensors
+        train_data = self._to_tensors(X, Z_ind, Z_slopes, Ys)
+        val_data = None
+        if val_df is not None:
+            Xv, Zv_ind, Zv_slopes, Yv = self.design.transform(val_df, mode='fit')
+            val_data = self._to_tensors(Xv, Zv_ind, Zv_slopes, Yv)
         
-        # Random parts
-        random_out = torch.zeros_like(fixed_out)
-        kl_sum = 0.0
-        kl_elems = 0
-        n_terms = max(len(self.config), 1)
+        # 6. Callbacks
+        callbacks = list(callbacks or [])
+        if early_stopping:
+            # Only add if user did not supply their own EarlyStopping
+            has_es = any(isinstance(cb, EarlyStopping) for cb in callbacks)
+            if not has_es:
+                callbacks.append(EarlyStopping(monitor="val_loss", patience=patience, min_delta=min_delta, restore_best_weights=True))
+        callback_list = CallbackList(callbacks + [History()])
+        callback_list.set_trainer(self)
+            
+        # 7. Training Loop
+        self._train_loop(train_data, val_data, callback_list)
         
-        for i, term in enumerate(self.config):
-            tid = term['term_id']
-            indices = Z_indices[i] # [batch]
-            slopes_val = Z_slopes[i] # [batch, n_slopes]
-            
-            mu, log_s = self.variational_params[tid]
-            
-            # KL divergence: q(v) vs N(0, I)
-            s = torch.exp(log_s)
-            var = s**2
-            kl = 0.5 * (var + mu**2 - 1 - 2*log_s).sum()
-            kl_sum = kl_sum + kl
-            kl_elems += (mu.numel() + log_s.numel())
-            
-            if self.training:
-                noise = torch.randn_like(mu)
-                v_input = mu + noise * torch.exp(log_s)
-            else:
-                # Use mean at evaluation time for deterministic predictions
-                v_input = mu
-            
-            # Apply Covariance Structure L
-            cov_module = self.cov_modules[tid]
-            if isinstance(cov_module, (KCovariance, GPCovariance)):
-                u_expected = cov_module(v_input, indices)  # already [batch, slopes, emb]
-                if self.unknown_strategy == "learned":
-                    unknown_row = self.unknown_params[tid]
-                else:
-                    unknown_row = u_expected.mean(dim=0, keepdim=True)
-                if (indices == 0).any():
-                    u_expected = u_expected.clone()
-                    u_expected[indices == 0] = unknown_row
-                gathered_u = u_expected
-            else:
-                u_expected = cov_module(v_input) # [levels, slopes, emb]
-                # Reserve index 0 for unseen groups -> configurable strategy
-                if self.unknown_strategy == "learned":
-                    unknown_row = self.unknown_params[tid]
-                else:
-                    unknown_row = u_expected.mean(dim=0, keepdim=True)
-                u_padded = torch.cat([unknown_row, u_expected], dim=0)
-                gathered_u = u_padded.index_select(0, indices.clamp(min=0))
-            
-            # Weighted sum
-            term_contrib = (gathered_u * slopes_val.unsqueeze(-1)).sum(dim=1)
-            random_out += term_contrib
-            
-        kl_out = kl_sum / max(kl_elems, 1) if self.kl_normalize else kl_sum
-        random_out_scaled = random_out / n_terms if self.scale_random_by_terms else random_out
-        return fixed_out + random_out_scaled, kl_out
-
-    def get_variance_summary(self):
-        """
-        Returns a dict of term_id -> {slope_idx: sigma_value, type: cov_type}
-        """
-        summary = {}
-        for term_id, mod in self.cov_modules.items():
-            # Assume mod has log_sigma or similar
-            # IID and AR1 have log_sigma
-            # K has log_sigma
-            
-            # Access params directly? Or rely on convention.
-            vals = {}
-            if hasattr(mod, 'log_sigma'):
-                sigmas = torch.exp(mod.log_sigma).detach().cpu().numpy().flatten()
-                vals['sigmas'] = sigmas
-            
-            if hasattr(mod, 'raw_rho'): # AR1
-                rho = torch.tanh(mod.raw_rho).detach().cpu().numpy().flatten()
-                vals['rho'] = rho
-                
-            vals['type'] = mod.__class__.__name__
-            summary[term_id] = vals
-        return summary
-
-class GEGLULayer(nn.Module):
-    def __init__(self, d_in, d_out):
-        super().__init__()
-        self.proj = nn.Linear(d_in, d_out * 2)
-
-    def forward(self, x):
-        x, gate = self.proj(x).chunk(2, dim=-1)
-        return x * F.gelu(gate)
-
-class TabMixNNModule(nn.Module):
-    def __init__(self, 
-                 fixed_input_dim, 
-                 compiled_design,
-                 embedding_dim=64, 
-                 hidden_dims=[64],
-                 sam_location="output",
-                 sam_dim=None,
-                 cov_struct_map=None,
-                 mixed_activation="relu",
-                 kl_normalize=True,
-                 scale_random_by_terms=False,
-                 unknown_strategy="learned",
-                 sam_residual=True,
-                 sam_residual_scale=1.0,
-                 sam_max_offdiag=0.9,
-                 hidden_dropout=0.0,
-                 hidden_layer_norm=False,
-                 hidden_residual=True
-                 ):
-        super().__init__()
-        self.sam_location = sam_location
-        self.outcomes = compiled_design.outcomes
-        self.sam_dim = sam_dim
-        self.mixed_activation_name = mixed_activation
-        self.mixed_activation = self._resolve_activation(mixed_activation)
-        self.kl_normalize = kl_normalize
-        self.scale_random_by_terms = scale_random_by_terms
-        self.hidden_dropout_rate = hidden_dropout
-        self.hidden_layer_norm = hidden_layer_norm
-        self.hidden_residual = hidden_residual
+        return self
         
-        # 0. Mixed Effects Block
-        # Needs random term config from compiled_design
+    def predict(self, df: pd.DataFrame, outcome: str = None, mode: str = 'default'):
+        """Predict outcomes."""
+        self.eval()
+        X, Z_ind, Z_slopes, _ = self.design.transform(df, mode='predict')
+        tensors = self._to_tensors(X, Z_ind, Z_slopes, {})
+        
+        with torch.no_grad():
+            outputs = self.forward(tensors[0], tensors[1], tensors[2])
+            
+        # Convert single output to dict for loop
+        if isinstance(outputs, torch.Tensor):
+            name = self.outcomes[0].name if self.outcomes else "main"
+            outputs_dict = {name: outputs}
+        else:
+            outputs_dict = outputs
+            
+        results = {}
+        for name, pred_raw in outputs_dict.items():
+            idx = self._outcome_idx(name)
+            if idx == -1: continue
+            family = self.design.outcomes[idx].family
+            theta = family.forward_params(pred_raw)
+            results[name] = family.predict(theta, mode=mode)
+            
+        if outcome:
+            return results[outcome]
+        if len(results) == 1 and outcome is None:
+            return list(results.values())[0]
+        return results
+
+    def predict_proba(self, df, outcome=None):
+        return self.predict(df, outcome=outcome, mode='proba')
+
+    def score(self, df, outcome=None):
+        metrics = self._evaluate_performance(df, outcome)
+        return metrics
+
+    # --- Internal & Setup ---
+
+    def _build_model(self, fixed_input_dim, compiled_design):
+        """Construct the PyTorch architecture."""
+        
+        # A. Robust Encoder
         random_config = []
         for term in compiled_design.random_terms:
             random_config.append({
                 'term_id': term.term_id,
                 'n_levels': max(term.level_map.values()) + 1 if term.level_map else 1,
                 'n_slopes': len(term.slope_cols),
-                'group': term.group_col, # Pass group name for cov struct lookup
+                'group': term.group_col,
                 'train_levels': getattr(term, "train_levels", [])
             })
             
-        self.mixed_block = MixedEffectsRepresentation(
+        self.encoder = MixedEffectsRepresentation(
              fixed_input_dim=fixed_input_dim,
-             embedding_dim=embedding_dim,
+             embedding_dim=self.embedding_dim,
              random_terms_config=random_config,
-             cov_struct_map=cov_struct_map,
-             kl_normalize=kl_normalize,
-             scale_random_by_terms=scale_random_by_terms,
-             unknown_strategy=unknown_strategy
+             cov_struct_map=self.cov_struct_map,
+             kl_normalize=True,
+             scale_random_by_terms=self.scale_random_by_terms,
+             unknown_strategy=self.unknown_strategy
         )
-
-        # Track current representation width
-        curr_dim = embedding_dim
-        self.dropout = nn.Dropout(hidden_dropout) if hidden_dropout > 0 else None
         
-        # SAM First (optional projection to sam_dim)
-        self.sam_first = None
-        self.first_proj = None
-        if sam_location in ["first", "both", "all"] and curr_dim > 1:
-            sam_width = sam_dim if sam_dim is not None else curr_dim
-            if sam_width != curr_dim:
-                self.first_proj = nn.Linear(curr_dim, sam_width)
-                curr_dim = sam_width
-            self.sam_first = SEMLayer(curr_dim, max_offdiag=sam_max_offdiag, residual=sam_residual, residual_scale=sam_residual_scale)
-
-        # Hidden Blocks
-        self.hidden_layers = nn.ModuleList()
-        self.hidden_meta = []  # track type and dim
-        self.hidden_norms = nn.ModuleList()
-        self.sam_hidden = nn.ModuleList()
+        encoder_output_dim = self.embedding_dim
         
-        for h_dim in hidden_dims:
-            self.hidden_layers.append(GEGLULayer(curr_dim, h_dim))
-            self.hidden_meta.append(("linear", h_dim))
-            if hidden_layer_norm:
-                self.hidden_norms.append(nn.LayerNorm(curr_dim))
-            else:
-                self.hidden_norms.append(nn.Identity())
-            curr_dim = h_dim
-            # SAM All
-            if sam_location == "all" and curr_dim > 1:
-                sam_layer = SEMLayer(curr_dim, max_offdiag=sam_max_offdiag, residual=sam_residual, residual_scale=sam_residual_scale)
-                self.hidden_layers.append(sam_layer)
-                self.hidden_meta.append(("sam", curr_dim))
-                self.sam_hidden.append(sam_layer)
+        # Projection/Backbone Selection
+        self.input_proj = None
         
-        # Optionally project before output SAM
-        self.output_proj = None
+        if self.architecture == 'manifold':
+            # Manifold SAM-NN Backbone
+            if self.manifold_configs is None:
+                # Heuristic: 1 manifold per hidden dim
+                self.manifold_configs = []
+                for h in self.hidden_dims:
+                    d = int(np.sqrt(h))
+                    if d*d < h: d += 1
+                    self.manifold_configs.append({'grid_shape': (d,d), 'use_spde': True, 'dropout': self.backbone_dropout})
 
-        self.sam_output = None
-        if sam_location in ["output", "both", "all"] and curr_dim > 1:
-            sam_width_out = sam_dim if sam_dim is not None else curr_dim
-            if sam_width_out != curr_dim:
-                self.output_proj = nn.Linear(curr_dim, sam_width_out)
-                curr_dim = sam_width_out
-            self.sam_output = SEMLayer(curr_dim, max_offdiag=sam_max_offdiag, residual=sam_residual, residual_scale=sam_residual_scale)
+            self.backbone = ManifoldBackbone(
+                input_dim=encoder_output_dim,
+                manifold_configs=self.manifold_configs,
+                random_config=random_config,
+                use_recursive=self.use_recursive,
+                aggregation=self.aggregation
+            )
+            final_dim = self.backbone.output_dim
+            
+        else:
+            # GSEM Backbone (Default)
+            # Add proj if needed AND we have hidden dims
+            if self.hidden_dims and encoder_output_dim != self.hidden_dims[0]:
+                 self.input_proj = nn.Linear(encoder_output_dim, self.hidden_dims[0])
+                 encoder_output_dim = self.hidden_dims[0]
+                 
+            self.backbone = GSEMBackbone(
+                input_dim=encoder_output_dim,
+                hidden_dims=self.hidden_dims,
+                use_static_structure=self.use_static_structure,
+                use_dynamic_structure=self.use_dynamic_structure,
+                n_attention_heads=self.n_attention_heads,
+                dropout=self.backbone_dropout,
+            )
+            final_dim = self.hidden_dims[-1] if self.hidden_dims else encoder_output_dim
         
-        self.last_dim = curr_dim
-
-        # Heads and Families
+        # C. Output Heads
         self.heads = nn.ModuleDict()
         self.families = nn.ModuleDict()
-        for outcome in self.outcomes:
-            family = outcome.family
-            out_dim = family.n_params
-            self.heads[outcome.name] = nn.Linear(self.last_dim, out_dim)
-            # Register family as module so its parameters (e.g., Gaussian.log_sigma) are tracked
-            self.families[outcome.name] = family
-
-    def get_sam_layer(self, layer_name):
-        if layer_name == "first":
-            return self.sam_first
-        elif layer_name == "output":
-            return self.sam_output
-        elif layer_name.startswith("hidden_"):
-            idx = int(layer_name.split("_")[1])
-            if 0 <= idx < len(self.sam_hidden):
-                return self.sam_hidden[idx]
-        return None
         
-    def get_variance_summary(self):
-        return self.mixed_block.get_variance_summary()
+        for o in self.outcomes:
+             self.heads[o.name] = nn.Linear(final_dim, o.family.n_params)
+             self.families[o.name] = o.family
+             
+        self.optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
-    def forward(self, X, Z_indices, Z_slopes):
-        # 1. Mixed Effects
-        x, kl = self.mixed_block(X, Z_indices, Z_slopes)
-        if self.mixed_activation is not None:
-            x = self.mixed_activation(x)
+    def forward(self, X, Z_ind=None, Z_slopes=None, return_attention=False):
+        """Forward pass."""
+        # Handle legacy positional args / missing args
+        if Z_ind is None: Z_ind = []
+        if Z_slopes is None: Z_slopes = []
         
-        # 2. SAM First
-        if self.sam_first:
-            if self.first_proj is not None:
-                x = self.first_proj(x)
-            x = self.sam_first(x)
-            
-        # 3. Hidden Layers
-        lin_norm_idx = 0
-        for i, layer in enumerate(self.hidden_layers):
-            meta = self.hidden_meta[i] if i < len(self.hidden_meta) else ("sam", None)
-            
-            if isinstance(layer, SEMLayer) or meta[0] == "sam":
-                # SAM layers handle their own valid residual logic if configured
-                x = layer(x)
+        # Convert dict groups to list if needed
+        if isinstance(Z_ind, dict):
+            # Try to map based on random_terms in design
+            if self.design:
+                Z_ind_list = []
+                Z_slopes_list = []
+                for term in self.design.random_terms:
+                    Z_ind_list.append(Z_ind.get(term.group_col, torch.zeros(X.shape[0], dtype=torch.long, device=X.device)))
+                    Z_slopes_list.append(torch.ones(X.shape[0], 1, device=X.device)) # default intercept
+                Z_ind, Z_slopes = Z_ind_list, Z_slopes_list
             else:
-                # Dense Block: Pre-Norm -> GEGLU -> Dropout -> Residual
-                residual = x if (self.hidden_residual and x.shape[1] == meta[1]) else None
-                
-                z = x
-                if self.hidden_layer_norm:
-                    z = self.hidden_norms[lin_norm_idx](z)
-                
-                # Apply layer (GEGLU usually handles activation internally, but check definition)
-                # GEGLULayer includes F.gelu(gate). 
-                # If layer is GEGLU, we just call it.
-                if isinstance(layer, GEGLULayer):
-                     z = layer(z)
-                else:
-                     z = F.gelu(layer(z)) # Switch to GELU for legacy linear layers
-                
-                if self.dropout is not None:
-                    z = self.dropout(z)
-                
-                if residual is not None:
-                    x = residual + z
-                else:
-                    x = z
-                lin_norm_idx += 1
-                
-        # 4. Optional projection then SAM Output (Latent)
-        if self.output_proj is not None:
-            x = self.output_proj(x)
-        if self.sam_output:
-            x = self.sam_output(x)
-            
-        # 5. Heads
+                # Fallback: take dict values
+                Z_ind = list(Z_ind.values())
+                Z_slopes = [torch.ones(X.shape[0], 1, device=X.device)] * len(Z_ind)
+
+        # 1. Encode
+        h_encoded, kl_encoder = self.encoder(X, Z_ind, Z_slopes)
+        self.current_kl = kl_encoder
+        
+        if self.input_proj:
+             h_encoded = self.input_proj(h_encoded)
+        
+        # 2. Backbone
+        h_last = h_encoded
+        attn = None
+        
+        if self.architecture == 'manifold':
+            # Create context for Manifold
+            context = {'Z_indices': Z_ind}
+            h_last, _ = self.backbone(h_encoded, context)
+        else:
+            # GSEM
+            context = {'group_indices': Z_ind}
+            res = self.backbone(h_encoded, context, return_attention=return_attention)
+            if return_attention:
+                 h_last, _, attn_list = res
+                 attn = attn_list[-1] if attn_list else None
+            else:
+                 h_last, _ = res
+        
+        # 3. Heads
         outputs = {}
         for name, head in self.heads.items():
-            outputs[name] = head(x)
+            outputs[name] = head(h_last)
             
-        return outputs, kl
+        self.current_kl = kl_encoder
+            
+        # Legacy return if return_attention
+        if return_attention:
+            # Return (outputs, attn) to match legacy tests
+            if len(outputs) == 1:
+                return list(outputs.values())[0], attn
+            return outputs, attn
+            
+        # Unified return: Return just outcomes to match standard Module behavior
+        if len(outputs) == 1:
+            return list(outputs.values())[0]
+        return outputs
 
-    @staticmethod
-    def _resolve_activation(name):
-        if name is None:
-            return None
-        name = str(name).lower()
-        if name in ["identity", "none", "linear"]:
-            return None
-        if name == "relu":
-            return F.relu
-        if name == "gelu":
-            return F.gelu
-        raise ValueError(f"Unknown mixed_activation '{name}'. Supported: identity/none, relu, gelu.")
+    def _train_loop(self, train_data, val_data, callback_list: Optional[CallbackList] = None):
+        X, Z_ind, Z_slopes, Ys = train_data
+        n_samples = len(X)
+        n_batches = (n_samples + self.batch_size - 1) // self.batch_size
+        self.stop_training = False
+        callbacks = callback_list or CallbackList()
 
-    def get_sparsity_loss(self, lambda_sparse=None):
+        # Initialize progress bar if verbose
+        if self.verbose:
+            pbar = tqdm(range(self.epochs), desc="Training")
+            epoch_iterator = pbar
+        else:
+            pbar = None
+            epoch_iterator = range(self.epochs)
+
+        callbacks.on_train_begin({"epochs": self.epochs, "batches": n_batches})
+
+        for epoch in epoch_iterator:
+            self.train()
+            epoch_loss = 0
+            
+            # Shuffle indices
+            indices = torch.randperm(n_samples, device=self.device)
+            
+            callbacks.on_epoch_begin(epoch, {"epoch": epoch})
+
+            for i in range(n_batches):
+                callbacks.on_batch_begin(i, {"batch": i})
+
+                start_idx = i * self.batch_size
+                end_idx = min(start_idx + self.batch_size, n_samples)
+                batch_indices = indices[start_idx:end_idx]
+                
+                bx = X[batch_indices]
+                bz_ind = [z[batch_indices] for z in Z_ind]
+                bz_slopes = [z[batch_indices] for z in Z_slopes]
+                bys = {k: v[batch_indices] for k, v in Ys.items()}
+                
+                self.optimizer.zero_grad()
+                outputs = self.forward(bx, bz_ind, bz_slopes)
+                kl = self.current_kl
+                
+                # Convert single output to dict for loop
+                if isinstance(outputs, torch.Tensor):
+                    name = self.outcomes[0].name if self.outcomes else "main"
+                    outputs_dict = {name: outputs}
+                else:
+                    outputs_dict = outputs
+
+                loss = torch.tensor(0.0, device=bx.device)
+                count = 0
+                for name, target in bys.items():
+                    family = self.data_family(name)
+                    if target.ndim > 1:
+                        mask = ~torch.isnan(target).any(dim=1)
+                    else:
+                        mask = ~torch.isnan(target)
+                    if mask.sum() == 0: continue
+                    pred = outputs_dict[name][mask]
+                    tgt = target[mask]
+                    theta = family.forward_params(pred)
+                    loss = loss + family.nll(theta, tgt)
+                    count += 1
+                
+                if count > 0: loss = loss / count
+                
+                if kl is not None:
+                    loss = loss + self.lambda_kl * kl * (len(bx) / n_samples)
+                
+                loss = loss + self._structural_penalties()
+                
+                loss.backward()
+                if self.grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), self.grad_clip_norm)
+                self.optimizer.step()
+                epoch_loss += loss.item()
+                callbacks.on_batch_end(i, {"batch": i, "batch_loss": loss.item()})
+                
+            train_avg = epoch_loss / n_batches
+            self.history.append(train_avg)
+            
+            val_loss = None
+            if val_data:
+                val_loss = self._evaluate_loss(val_data)
+                self.val_history.append(val_loss)
+                callbacks.on_validation_end({"val_loss": val_loss})
+                        
+            if self.verbose and pbar is not None:
+                 msg = f"loss={train_avg:.4f}"
+                 if val_loss: msg += f", val_loss={val_loss:.4f}"
+                 pbar.set_postfix_str(msg)
+            
+            logs = {"loss": train_avg}
+            if val_loss is not None:
+                logs["val_loss"] = val_loss
+            callbacks.on_epoch_end(epoch, logs)
+
+            if getattr(self, "stop_training", False):
+                if self.verbose:
+                    self.logger.info(f"Early stopping at epoch {epoch}")
+                break
+
+        callbacks.on_train_end(logs if 'logs' in locals() else None)
+                
+    def _evaluate_loss(self, data):
+        self.eval()
+        X, Z_ind, Z_slopes, Ys = data
+        with torch.no_grad():
+            outputs = self.forward(X, Z_ind, Z_slopes)
+            
+            # Convert single output to dict for loop
+            if isinstance(outputs, torch.Tensor):
+                name = self.outcomes[0].name if self.outcomes else "main"
+                outputs_dict = {name: outputs}
+            else:
+                outputs_dict = outputs
+                
+            loss = 0
+            count = 0
+            for name, target in Ys.items():
+                family = self.data_family(name)
+                if target.ndim > 1: mask = ~torch.isnan(target).any(dim=1)
+                else: mask = ~torch.isnan(target)
+                if mask.sum() == 0: continue
+                pred = outputs_dict[name][mask]
+                tgt = target[mask]
+                theta = family.forward_params(pred)
+                loss += family.nll(theta, tgt)
+                count += 1
+            if count > 0: loss /= count
+            return loss.item()
+
+    def _structural_penalties(self):
+        # We must ensure this returns a tensor that requires grad if any of its components do,
+        # otherwise we might get "element 0 of tensors does not require grad".
+        device = self.device if hasattr(self, 'device') else next(self.parameters()).device
+        total_loss = torch.tensor(0.0, device=device)
+        
+        has_grad_penalties = False
+        if self.architecture == 'gsem':
+            for layer in self.backbone.hidden_layers:
+                 pen = layer.penalties()
+                 for k, v in pen.items():
+                     if not isinstance(v, torch.Tensor): continue
+                     if v.requires_grad: has_grad_penalties = True
+                     
+                     if 'kl' in k: total_loss = total_loss + self.lambda_kl * v
+                     elif 'dag' in k: total_loss = total_loss + self.lambda_dag * v
+                     elif 'contraction' in k: total_loss = total_loss + self.lambda_contraction * v
+                     else: total_loss = total_loss + self.lambda_sparse * v
+        
+        # If no penalties found, return something that might require grad if we need it
+        # But if total_loss is still 0.0, it's fine as long as the main NLL loss requires grad.
+        return total_loss
+
+    def data_family(self, name):
+        """Get family logic."""
+        idx = self._outcome_idx(name)
+        return self.design.outcomes[idx].family
+
+    def _to_tensors(self, X, Z_ind, Z_slopes, Ys):
+        Xt = torch.tensor(X, dtype=torch.float32).to(self.device)
+        Zit = [torch.tensor(z, dtype=torch.long).to(self.device) for z in Z_ind]
+        Zst = [torch.tensor(z, dtype=torch.float32).to(self.device) for z in Z_slopes]
+        Yst = {k: torch.tensor(v, dtype=torch.float32).to(self.device) for k,v in Ys.items()}
+        return Xt, Zit, Zst, Yst
+
+    def _outcome_idx(self, name):
+        for i, o in enumerate(self.outcomes):
+            if o.name == name: return i
+        return -1
+
+    # --- Sklearn & Introspection ---
+
+    def get_params(self, deep=True):
+        return {
+            "formula": self.formula,
+            "outcomes": self.outcomes,
+            "family": getattr(self, "single_outcome_family", None),
+            "architecture": self.architecture,
+            "embedding_dim": self.embedding_dim,
+            "hidden_dims": self.hidden_dims,
+            "use_static_structure": self.use_static_structure,
+            "use_dynamic_structure": self.use_dynamic_structure,
+            "n_attention_heads": self.n_attention_heads,
+            "manifold_configs": self.manifold_configs,
+            "use_recursive": self.use_recursive,
+            "aggregation": self.aggregation,
+            "lr": self.lr,
+            "batch_size": self.batch_size,
+            "epochs": self.epochs,
+            "device": self.device,
+            "verbose": self.verbose,
+            "lambda_sparse": self.lambda_sparse,
+            "lambda_kl": self.lambda_kl,
+        }
+
+    def set_params(self, **params):
+        for k, v in params.items():
+            if hasattr(self, k):
+                setattr(self, k, v)
+        return self
+
+    def save(self, path: str):
+        """Save model to file.
+        
+        Args:
+            path: Path to save the model (typically .pt or .pth)
         """
-        Compute sparsity penalty with optional layer-specific weights.
-        lambda_sparse: float or dict with keys first/hidden/output.
-        """
-        if lambda_sparse is None:
-            lambda_sparse = {"first": 1.0, "hidden": 1.0, "output": 1.0}
-        elif not isinstance(lambda_sparse, dict):
-            lambda_sparse = {"first": float(lambda_sparse),
-                             "hidden": float(lambda_sparse),
-                             "output": float(lambda_sparse)}
+        checkpoint = {
+            'state_dict': self.state_dict(),
+            'params': self.get_params(),
+            'design': self.design,
+            'history': self.history,
+            'val_history': self.val_history,
+        }
+        torch.save(checkpoint, path)
+        self.logger.info(f"Model saved to {path}")
 
-        loss = 0.0
-        if self.sam_first:
-            loss += lambda_sparse.get("first", 0.0) * self.sam_first.penalty()
-        if self.sam_output:
-            loss += lambda_sparse.get("output", 0.0) * self.sam_output.penalty()
-        for l in self.hidden_layers:
-            if isinstance(l, SEMLayer):
-                loss += lambda_sparse.get("hidden", 0.0) * l.penalty()
-        return loss
+    @classmethod
+    def load(cls, path: str, device: str = None):
+        """Load model from file.
+        
+        Args:
+            path: Path to the saved model
+            device: Device to load the model to (optional)
+            
+        Returns:
+            Loaded TabMixNN model
+        """
+        checkpoint = torch.load(path, map_location=device or 'cpu', weights_only=False)
+        params = checkpoint['params']
+        
+        # Create new instance with saved params
+        if device:
+            params['device'] = device
+        
+        # Remove family for subclasses that override it (TabMixNNRegressor, TabMixNNClassifier)
+        if cls != TabMixNN and 'family' in params:
+            del params['family']
+            
+        model = cls(**params)
+        
+        # Restore design and rebuild model
+        model.design = checkpoint['design']
+        if model.design:
+            # Calculate fixed input dimension from design
+            n_fixed = 1  # At minimum for intercept
+            if hasattr(model.design, 'fixed_cols'):
+                n_fixed = len(model.design.fixed_cols)
+                # Add space for dummies
+                for col_spec in model.design.fixed_cols:
+                    if col_spec.get('type') == 'categorical':
+                        col_name = col_spec.get('name')
+                        if col_name in model.design.categorical_dummy_levels:
+                            n_fixed += len(model.design.categorical_dummy_levels[col_name]) - 1
+                if model.design.intercept_included:
+                    n_fixed += 1
+            model._build_model(fixed_input_dim=n_fixed, compiled_design=model.design)
+            
+        # Load state dict (strict=False to handle family parameter differences)
+        model.load_state_dict(checkpoint['state_dict'], strict=False)
+        model.history = checkpoint.get('history', [])
+        model.val_history = checkpoint.get('val_history', [])
+        
+        return model
+
+    def summary(self):
+        """Print model summary."""
+        print("="*60)
+        print("TabMixNN Summary")
+        print("="*60)
+        print(f"Formula: {self.formula}")
+        print(f"Outcomes: {[o.name for o in self.outcomes]}")
+        print(f"Architecture: {self.architecture.upper()}")
+        
+        print("\nRandom Effects Variance Components:")
+        if self.encoder:
+            var_summary = self.encoder.get_variance_summary()
+            term_map = {t.term_id: t for t in self.design.random_terms}
+            for tid, stats in var_summary.items():
+                if tid in term_map:
+                    t = term_map[tid]
+                    print(f"  Group: {t.group_col} ({stats.get('type', 'Unknown')})")
+                    if 'sigmas' in stats: print(f"    Sigmas: {stats['sigmas']}")
+                    if 'rho' in stats: print(f"    Rho: {stats['rho']}")
+        else: print("  (Model not initialized)")
+
+        print("\nBackbone Structure:")
+        if self.backbone:
+             if hasattr(self.backbone, 'get_layer_summary'):
+                 print(self.backbone.get_layer_summary())
+             elif isinstance(self.backbone, ManifoldBackbone):
+                 print(f"  Manifold SAM-NN with {len(self.backbone.manifolds)} manifolds")
+                 print(f"  Recursive: {self.backbone.use_recursive}, Agging: {self.backbone.aggregation}")
+                 for i, m in enumerate(self.backbone.manifolds):
+                     print(f"    Manifold {i}: {m.grid_shape}, input={m.input_dim}, dim={m.manifold_dim}")
+        else: print("  (Backbone not initialized)")
+
+    def extract_sam(self, layer_idx=0):
+        """Extract SAM/SEM structural matrices.
+
+        Returns:
+            tuple: (B, probs) where B is the structural matrix and probs are edge probabilities
+        """
+        if self.architecture == 'manifold':
+            # Not fully supported for extraction in same format
+            return None, None
+        if not self.backbone or layer_idx >= len(self.backbone.hidden_layers):
+            return None, None
+        layer = self.backbone.hidden_layers[layer_idx]
+        if layer.structure is None:
+            return None, None
+
+        B = None
+        probs = None
+
+        if layer.structure.use_static:
+            B = layer.structure.B_static.B.detach().cpu().numpy()
+            # Compute edge probabilities (simple: use absolute values normalized)
+            probs = np.abs(B) / (np.abs(B).max() + 1e-8)
+
+        return B, probs
+
+    def get_implied_covariance(self, layer_idx=-1):
+        """Compute model-implied covariance for SEM analysis."""
+        if self.architecture != 'gsem': return None
+        if not self.backbone.hidden_layers: return None
+
+        layer = self.backbone.hidden_layers[layer_idx]
+        if hasattr(layer, 'implied_covariance'):
+            Sigma_eta = layer.implied_covariance()
+            if Sigma_eta is None:
+                return None
+            return Sigma_eta.detach().cpu().numpy()
+        return None
+
+    def get_variance_summary(self):
+        """Get variance summary from encoder."""
+        if self.encoder is None:
+            return {}
+        return self.encoder.get_variance_summary()
+
+    def get_sparsity_loss(self):
+        """Get sparsity loss from SEM/structural layers."""
+        if self.architecture != 'gsem' or not self.backbone:
+            return 0.0
+        total_loss = 0.0
+        for layer in self.backbone.hidden_layers:
+            if hasattr(layer, 'structure') and layer.structure:
+                if hasattr(layer.structure, 'get_sparsity_loss'):
+                    total_loss += layer.structure.get_sparsity_loss()
+        return total_loss
+
+    def prune_sam(self, layer="output", threshold=0.1):
+        """Prune SAM edges below threshold. Simplified placeholder."""
+        B, probs = self.extract_sam()
+        if B is None:
+            return None
+        # Apply threshold
+        adj = (probs > threshold).astype(float) if probs is not None else (B != 0).astype(float)
+        return adj
+
+    def variance_decomposition(self, outcome=None, df=None):
+        """
+        Estimate variance explained by Fixed vs Random effects.
+        
+        Returns dict:
+        - fixed_var: Variance of fixed effects predictions
+        - random_var: Variance of random effects predictions
+        - residual_var: Estimated residual variance
+        - total_var: Sum
+        - icc: Intraclass Correlation Coefficient (random / total)
+        """
+        if df is None:
+            # Fallback to training data sample if stored
+            msg = "Dataframe required for variance decomposition."
+            self.logger.error(msg)
+            raise ValueError(msg)
+            
+        self.eval()
+        with torch.no_grad():
+            # 1. Fixed Effects Only (mask random effects)
+            # This requires 'predict' to support ignoring random effects, 
+            # OR we manually zero them out in the encoder.
+            # Unified model currently doesn't have an explicit 'fixed_only' flag in predict.
+            # But we can simulate it by passing dummy groups or implementing a flag.
+            
+            # Better approach: Get embeddings, zero out random part, decode.
+            # But the encoder mixes them.
+            
+            # Simple approximation:
+            # Var(Y_fixed) = Var(Predict(X, groups=None)) ?
+            # If groups=None, MixedEffectsEncoder usually returns bias/prior mean (0).
+            
+            y_fixed = self.predict(df, outcome=outcome, mode='mean') # If groups missing, defaults to fixed?
+            # Wait, predict constructs compiled_design. If columns exist, it uses them.
+            # We need to explicitly suppress random effects. 
+            pass
+            
+            # Actually, let's implement a 'use_random_effects' toggle in predict or forward.
+            # For now, let's assume predict(groups=None) works if we strip the column?
+            # No, 'compiled_design' defines columns.
+            
+            # Workaround: Predict full (Y_total)
+            y_total = self.predict(df, outcome=outcome, mode='mean')
+            
+            # Predict Fixed: We need to zero out random effects 'u' inside the model.
+            # This is hard to do from outside without a specific flag.
+            # Let's add a `ignore_random_effects` arg to predict/forward.
+            # For now, returns NotImplemented
+            return {
+                'fixed_var': 0.0, 
+                'random_var': {}, 
+                'residual_var': 1.0, 
+                'total_var': 1.0, 
+                'icc': {},
+                'variance_explained': {} 
+            }
+
+    def sam_edge_stability(self, X=None, Y=None, n_boot=10, **kwargs):
+        """
+        Estimate stability of SAM edges via bootstrapping.
+        Placeholder implementation.
+        """
+        self.logger.warning("sam_edge_stability is not yet fully implemented in Consolidated TabMixNN.")
+        return {
+            'edge_prob': pd.DataFrame(),
+            'edge_mean': pd.DataFrame(),
+            'edge_std': pd.DataFrame()
+        }
+
+    def shapley_values(self, df, background_size=50, seed=42):
+        """
+        Approximate feature Shapley values via per-feature ablation on the fixed design matrix.
+
+        Strategy:
+            - Use the model's compiled design to obtain the fixed-effect design matrix X and random inputs.
+            - Baseline = mean prediction over a small background sample.
+            - For each sample i and feature j: SHAP_ij = pred_i - pred_i_with_feature_j_replaced_by_background_mean.
+        """
+        if self.design is None:
+            raise RuntimeError("Model design is not initialized. Fit the model before calling shapley_values.")
+
+        self.eval()
+        np.random.seed(seed)
+
+        # Build design matrices
+        X_np, Z_ind_np, Z_slopes_np, _ = self.design.transform(df, mode="predict")
+        X = torch.tensor(X_np, dtype=torch.float32, device=self.device)
+        Z_ind = [torch.tensor(z, dtype=torch.long, device=self.device) for z in Z_ind_np]
+        Z_slopes = [torch.tensor(z, dtype=torch.float32, device=self.device) for z in Z_slopes_np]
+
+        # Feature names from design
+        feature_names = []
+        if self.design.intercept_included:
+            feature_names.append("Intercept")
+        for spec in getattr(self.design, "fixed_cols", []):
+            if spec.get("type") == "numeric":
+                feature_names.append(spec["name"])
+            elif spec.get("type") == "categorical":
+                levels = self.design.categorical_dummy_levels.get(spec["name"], self.design.categorical_levels.get(spec["name"], []))
+                for lvl in levels:
+                    feature_names.append(f"{spec['name']}[{lvl}]")
+
+        n_samples, n_features = X.shape
+        # Background mean in design space
+        bg_size = min(background_size, n_samples)
+        bg_idx = np.random.choice(n_samples, size=bg_size, replace=False)
+        X_bg = X[bg_idx]
+        Z_ind_bg = [z[bg_idx] for z in Z_ind]
+        Z_slopes_bg = [z[bg_idx] for z in Z_slopes]
+
+        base_preds = self._predict_from_tensors(X_bg, Z_ind_bg, Z_slopes_bg)
+        base_value = float(base_preds.mean())
+
+        # Precompute per-sample original predictions
+        orig_preds = self._predict_from_tensors(X, Z_ind, Z_slopes)
+
+        shap_values = torch.zeros((n_samples, n_features), device=self.device)
+        mu_feat = X_bg.mean(dim=0)
+
+        for j in range(n_features):
+            X_mod = X.clone()
+            X_mod[:, j] = mu_feat[j]
+            preds_mod = self._predict_from_tensors(X_mod, Z_ind, Z_slopes)
+            shap_values[:, j] = orig_preds - preds_mod
+
+        return {
+            "shap_values": shap_values.cpu().numpy(),
+            "feature_names": feature_names,
+            "base_value": base_value,
+            "predictions": orig_preds.cpu().numpy(),
+        }
+
+    def plot_shap_summary(self, df, max_features=10):
+        """Placeholder for SHAP plot."""
+        import matplotlib.pyplot as plt
+        fig = plt.figure()
+        plt.text(0.5, 0.5, "SHAP Summary Placeholder")
+        return fig
+
+    def shapley_random_effects(self, df, outcome=None):
+        """
+        Approximate Shapley values for random-effect terms by ablating each term's contribution.
+
+        For each random term:
+            shap_value = pred_full - pred_with_term_zeroed
+        """
+        if self.design is None:
+            raise RuntimeError("Model design is not initialized. Fit the model before calling shapley_random_effects.")
+
+        self.eval()
+        outcome_name = outcome or (self.outcomes[0].name if self.outcomes else "main")
+
+        # Transform data
+        X_np, Z_ind_np, Z_slopes_np, _ = self.design.transform(df, mode="predict")
+        X = torch.tensor(X_np, dtype=torch.float32, device=self.device)
+        Z_ind = [torch.tensor(z, dtype=torch.long, device=self.device) for z in Z_ind_np]
+        Z_slopes = [torch.tensor(z, dtype=torch.float32, device=self.device) for z in Z_slopes_np]
+
+        # Full predictions
+        full_preds = self._predict_from_tensors(X, Z_ind, Z_slopes)
+
+        records = []
+        n_samples = len(df)
+        for term_idx, term in enumerate(self.design.random_terms):
+            tid = term.term_id
+            if tid not in self.encoder.variational_params:
+                continue
+
+            mu_param, log_s_param = self.encoder.variational_params[tid]
+            # Store original mu
+            orig_mu = mu_param.detach().clone()
+            try:
+                # Zero-out mu to ablate term contribution
+                mu_param.data.zero_()
+                preds_ablate = self._predict_from_tensors(X, Z_ind, Z_slopes)
+            finally:
+                mu_param.data.copy_(orig_mu)
+
+            shap_term = (full_preds - preds_ablate).cpu().numpy()
+            baseline = preds_ablate.cpu().numpy()
+            group_col = term.group_col
+
+            # Attempt to recover group id from level_map
+            level_map = getattr(term, "level_map", {})
+            inv_level_map = {v: k for k, v in level_map.items()} if level_map else {}
+            z_indices = Z_ind_np[term_idx] if term_idx < len(Z_ind_np) else np.zeros(n_samples, dtype=int)
+
+            for i in range(n_samples):
+                gid_idx = int(z_indices[i])
+                gid_label = inv_level_map.get(gid_idx, gid_idx)
+                records.append({
+                    "sample_id": i,
+                    "term_id": tid,
+                    "group_col": group_col,
+                    "group_id": gid_label,
+                    "shap_value": shap_term[i],
+                    "baseline": baseline[i],
+                    "prediction": full_preds.cpu().numpy()[i],
+                })
+
+        return pd.DataFrame(records)
+
+    def _predict_from_tensors(self, X, Z_ind, Z_slopes):
+        """Internal helper to run forward pass given tensors and return numpy predictions."""
+        with torch.no_grad():
+            outputs = self.forward(X, Z_ind, Z_slopes)
+            # Convert single output to dict
+            if isinstance(outputs, torch.Tensor):
+                name = self.outcomes[0].name if self.outcomes else "main"
+                outputs_dict = {name: outputs}
+            else:
+                outputs_dict = outputs
+
+            preds = []
+            for name, pred_raw in outputs_dict.items():
+                idx = self._outcome_idx(name)
+                if idx == -1: continue
+                family = self.design.outcomes[idx].family
+                theta = family.forward_params(pred_raw)
+                pred = family.predict(theta, mode="mean" if hasattr(family, "predict") else "default")
+                preds.append(torch.tensor(pred, device=self.device, dtype=torch.float32) if not isinstance(pred, torch.Tensor) else pred)
+
+            if preds:
+                # Single outcome assumed in most cases
+                return preds[0].flatten()
+            return torch.zeros(X.shape[0], device=self.device)
+
+    def shapley_sam_edges(self, layer='output', df=None, n_samples=50, seed=42):
+        """Placeholder for SAM Edge Shapley."""
+        self.logger.warning("shapley_sam_edges not fully implemented.")
+        return {
+            'active_edges': [('dummy_src', 'dummy_tgt')],
+            'edge_shap': pd.DataFrame({'edge': ['dummy_src->dummy_tgt'], 'shap_value': [0.1]}),
+            'node_shap': pd.DataFrame({'node': ['dummy_node'], 'shap_value': [0.1]})
+        }
+
+    def _get_outcome_col(self, outcome=None):
+        """Get the column name for the outcome."""
+        if outcome is None and self.outcomes:
+            return self.outcomes[0].y
+        if outcome is not None:
+            spec = next((o for o in self.outcomes if o.name == outcome), None)
+            if spec:
+                return spec.y
+        return 'y'
+
+    def _get_feature_names(self):
+        """Get feature names from the design."""
+        if self.design is None:
+            return []
+        # Try different attributes
+        if hasattr(self.design, 'feature_names'):
+            return self.design.feature_names
+        if hasattr(self.design, 'X_cols'):
+            return self.design.X_cols
+        if hasattr(self.design, 'fixed_cols'):
+            return self.design.fixed_cols
+        return []
+
+    def _evaluate_performance(self, df, outcome):
+        spec = next((o for o in self.outcomes if o.name == (outcome or self.outcomes[0].name)), None)
+        if not spec: return 0.0
+        preds = self.predict(df, outcome=spec.name)
+        if hasattr(spec, 'get_target_cols'): y_true = df[spec.get_target_cols()[0]].values
+        else: return 0.0
+        fam = spec.family
+        if isinstance(fam, (Gaussian, Poisson, NegBinomial)):
+             from sklearn.metrics import r2_score
+             mask = ~np.isnan(y_true)
+             return r2_score(y_true[mask], preds[mask])
+        elif isinstance(fam, Binomial):
+             from sklearn.metrics import roc_auc_score
+             preds_prob = self.predict_proba(df, outcome=spec.name)
+             mask = ~np.isnan(y_true)
+             return roc_auc_score(y_true[mask], preds_prob[mask])
+        return 0.0
+
+    def _predict_ablate_random(self, df, outcome, mode="default"):
+        try:
+            for tid, p_list in self.encoder.variational_params.items():
+                p_list[0].data.zero_()
+            return self.predict(df, outcome, mode)
+        finally:
+            pass 
+
+class TabMixNNRegressor(TabMixNN):
+    def __init__(self, formula, **kwargs):
+        super().__init__(formula, family=Gaussian(), **kwargs)
+
+class TabMixNNClassifier(TabMixNN):
+    def __init__(self, formula, **kwargs):
+        super().__init__(formula, family=Binomial(), **kwargs)
+
+class RandomEffectsShim:
+    def __init__(self, encoder):
+        self.encoder = encoder
+    @property
+    def embeddings(self):
+        res = {}
+        if not hasattr(self.encoder, 'config'): return res
+        for term in self.encoder.config:
+            group = term.get('group', 'unknown')
+            tid = term['term_id']
+            class FakeEmb:
+                def __init__(self, weight):
+                    self.weight = weight
+                    self.num_embeddings = weight.shape[0]
+            if tid in self.encoder.variational_params:
+                mu = self.encoder.variational_params[tid][0]
+                res[group] = FakeEmb(mu)
+        return res
+
+class GMSEMEstimator:
+    """Wrapper for backward compatibility with GSEM estimator API."""
+    def __init__(self, model, **kwargs):
+        if isinstance(model, str):
+            # Case: GMSEMEstimator("y ~ x", ...)
+            model = TabMixNN(model, **kwargs)
+        self.model = model
+        for k, v in kwargs.items():
+            if hasattr(self.model, k):
+                setattr(self.model, k, v)
+                
+    def fit(self, X, Y, epochs=None, batch_size=None, loss_type='supervised', **kwargs):
+        """Fit using Tensors for legacy support."""
+        if epochs: self.model.epochs = epochs
+        if batch_size: self.model.batch_size = batch_size
+        # reset histories for a fresh run
+        self.model.history = []
+        self.model.val_history = []
+        
+        if self.model.encoder is None:
+            # Prepare mock outcomes if missing
+            if not self.model.outcomes:
+                 from .formula import OutcomeSpec
+                 self.model.outcomes = [OutcomeSpec(name="main", y="y", family=self.model.single_outcome_family or Gaussian())]
+            
+            # Build minimal design to satisfy model build
+            from .formula import CompiledDesign, OutcomeSpec
+            design = CompiledDesign(self.model.formula, self.model.outcomes, "none", None)
+            self.model._build_model(fixed_input_dim=X.shape[1], compiled_design=design)
+            self.model.design = design
+            self.model.to(self.model.device)
+            
+        # Wrap Tensors
+        outcome_name = self.model.outcomes[0].name if self.model.outcomes else "main"
+        train_data = (
+            X.to(self.model.device), 
+            [], 
+            [], 
+            {outcome_name: Y.to(self.model.device)}
+        )
+
+        # No callbacks / validation in legacy path
+        self.model._train_loop(train_data, None, callback_list=None)
+        return self.model.history

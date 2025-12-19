@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from .kernels import rbf_kernel
 
 class CovarianceStructure(nn.Module):
     """
@@ -220,9 +221,12 @@ class GPCovariance(CovarianceStructure):
 
     def _kernel_full(self, lengthscale):
         # lengthscale: [n_slopes, 1]
-        l2 = torch.exp(2 * lengthscale).unsqueeze(-1).unsqueeze(-1)  # [n_slopes, 1, 1]
-        K = torch.exp(-0.5 * self.dist2.unsqueeze(0) / l2)  # [n_slopes, L, L]
-        return K
+        out = []
+        for s in range(self.n_slopes):
+            l = torch.exp(lengthscale[s])
+            K = rbf_kernel(self.coords, self.coords, l, jitter=self.lambda_k)
+            out.append(K)
+        return torch.stack(out)
 
     def forward(self, v_train, indices):
         """
@@ -377,3 +381,48 @@ class KCovariance(CovarianceStructure):
         u_all_padded = torch.cat([unknown_row, u_all], dim=0)
         gathered = u_all_padded[idx_adj]
         return gathered
+
+class LowRankCovariance(CovarianceStructure):
+    """
+    u = (D + VV^T)^1/2 v
+    Σ = D + V V^T
+    """
+    def __init__(self, n_levels, n_slopes, rank=5):
+        super().__init__(n_levels, n_slopes)
+        self.rank = rank
+        self.log_diag = nn.Parameter(torch.zeros(n_slopes, 1))
+        self.V = nn.Parameter(torch.randn(n_slopes, rank) * 0.1)
+
+    def forward(self, v):
+        L = self.get_cholesky() 
+        levels, slopes, emb = v.shape
+        v_flat = v.permute(0, 2, 1).reshape(-1, slopes) 
+        u_flat = v_flat @ L.T
+        return u_flat.view(levels, emb, slopes).permute(0, 2, 1)
+
+    def get_matrix(self):
+        # Handle case where n_slopes=1
+        if self.n_slopes == 1:
+            D = torch.exp(self.log_diag)
+            return D + self.V ** 2
+        D = torch.diag(torch.exp(self.log_diag).squeeze(-1))
+        return D + self.V @ self.V.T
+
+    def get_cholesky(self):
+        Sigma = self.get_matrix()
+        return torch.linalg.cholesky(Sigma + 1e-6 * torch.eye(self.n_slopes, device=Sigma.device))
+
+class FullCovariance(CovarianceStructure):
+    """
+    Unstructured covariance matrix Σ = L L^T.
+    """
+    def __init__(self, n_levels, n_slopes):
+        super().__init__(n_levels, n_slopes)
+        self.L_raw = nn.Parameter(torch.eye(n_slopes))
+
+    def forward(self, v):
+        L = torch.tril(self.L_raw)
+        levels, slopes, emb = v.shape
+        v_flat = v.permute(0, 2, 1).reshape(-1, slopes)
+        u_flat = v_flat @ L.T
+        return u_flat.view(levels, emb, slopes).permute(0, 2, 1)

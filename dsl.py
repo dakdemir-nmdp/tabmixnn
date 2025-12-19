@@ -1,6 +1,10 @@
 """
 Domain Specific Language (DSL) for Universal SAM-NN.
 
+⚠️ EXPERIMENTAL: This module is not yet integrated with the main TabMixNN API.
+It provides a preview of a declarative model specification syntax for future releases.
+Use `TabMixNN(formula="...")` for the current supported syntax.
+
 Allows clinicians and researchers to define complex hierarchical models
 in a few lines of intuitive text.
 
@@ -195,30 +199,33 @@ class SAMNNParser:
         # Extract name and config
         name, config_str = line.split(':', 1)
         name = name.strip()
-        
-        # Parse key=value pairs
+
+        # Special handling for grid tuple to avoid naive comma splitting
         config = {}
-        for item in config_str.split(','):
-            item = item.strip()
-            if '=' in item:
-                key, value = item.split('=', 1)
-                key = key.strip()
-                value = value.strip()
-                
-                # Parse value
-                if value.lower() in ('true', 'false'):
-                    config[key] = value.lower() == 'true'
-                elif value.startswith('(') and value.endswith(')'):
-                    # Tuple: (8,8)
-                    nums = value[1:-1].split(',')
-                    config[key] = tuple(int(n.strip()) for n in nums)
-                elif value.isdigit():
-                    config[key] = int(value)
-                elif value.replace('.', '').isdigit():
-                    config[key] = float(value)
-                else:
-                    config[key] = value
-        
+        grid_match = re.search(r'grid=\(([^)]+)\)', config_str)
+        if grid_match:
+            nums = grid_match.group(1).split(',')
+            config['grid'] = tuple(int(n.strip()) for n in nums if n.strip())
+            # Remove the grid portion from the string for subsequent parsing
+            config_str = re.sub(r'grid=\([^)]+\)', '', config_str)
+
+        # Parse remaining key=value pairs
+        for item in [i.strip() for i in config_str.split(',') if i.strip()]:
+            if '=' not in item:
+                continue
+            key, value = item.split('=', 1)
+            key = key.strip()
+            value = value.strip()
+
+            if value.lower() in ('true', 'false'):
+                config[key] = value.lower() == 'true'
+            elif value.isdigit():
+                config[key] = int(value)
+            elif value.replace('.', '', 1).isdigit():
+                config[key] = float(value)
+            else:
+                config[key] = value
+
         return ManifoldSpec(
             name=name,
             grid_shape=config.get('grid', (8, 8)),
