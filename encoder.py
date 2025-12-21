@@ -19,7 +19,29 @@ from .covariance import (
 
 
 class MixedEffectsRepresentation(nn.Module):
+    """
+    Mixed-effects encoder with variational random effects and covariance structures.
+
+    IMPORTANT - Index 0 Semantics:
+        Group index 0 is RESERVED for unknown/unseen groups in random effects.
+        - Training data groups are indexed starting from 1
+        - Test data with new groups receive index 0
+        - Behavior controlled by `unknown_strategy` parameter:
+            * "learned": Uses a learned embedding for unseen groups (self.unknown_params)
+            * "zero": Uses mean of training group embeddings
+        - This affects ALL random effect terms and is applied during forward()
+    """
     def __init__(self, fixed_input_dim, embedding_dim, random_terms_config, cov_struct_map=None, kl_normalize=True, scale_random_by_terms=False, unknown_strategy="learned"):
+        """
+        Args:
+            fixed_input_dim: Dimension of fixed effects input
+            embedding_dim: Dimension of embedding space
+            random_terms_config: List of random effect term configurations
+            cov_struct_map: Dict mapping term_id to covariance structure
+            kl_normalize: Normalize KL divergence by number of elements
+            scale_random_by_terms: Scale random effects by number of terms
+            unknown_strategy: Strategy for unseen groups - "learned" or "zero"
+        """
         super().__init__()
         # Fixed part
         self.fixed_linear = nn.Linear(fixed_input_dim, embedding_dim)

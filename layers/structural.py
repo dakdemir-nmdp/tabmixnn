@@ -488,37 +488,49 @@ class HybridStructuralModel(nn.Module):
             
         self.max_iter = 10
         self.tol = 1e-5
-        
+        self._convergence_failures = 0  # Track convergence failures for diagnostics
+
     def forward(self, xi, return_attention=False):
+        """
+        Forward pass with fixed-point iteration.
+
+        CONVERGENCE GUARANTEE:
+            For convergence, the spectral norm ||B_static + B_dynamic|| < 1 is required.
+            The contraction penalty encourages this during training, but does not enforce it.
+            If convergence fails (max_iter reached), a warning is logged.
+
+        Consider using CompositeStructuralModel for guaranteed stability without iteration.
+        """
         # Case 1: Static only
         if self.use_static and not self.use_dynamic:
             eta = self.B_static.solve(xi)
             if return_attention:
                 return eta, None
             return eta
-        
+
         # Case 2: Fixed-point iteration
         eta = xi.clone()
         attn_weights = None
-        
+        converged = False
+
         for i in range(self.max_iter):
             eta_old = eta.clone()
-            
+
             term = 0.0
             if self.use_static:
                 term = term + self.B_static(eta)
-                
+
             if self.use_dynamic:
                 dyn_term, attn = self.B_dynamic(eta, return_weights=True)
                 attn_weights = attn
                 term = term + dyn_term
-                
+
             # Note: interpolation_alpha applied to weights or terms?
             # Blueprint: alpha * static + (1-alpha) * dynamic
             # But what about identity? (I - B...)
             # "structural_term = alpha * static_term + (1 - alpha) * dynamic_term"
             # This implies B_total = alpha*B_s + (1-alpha)*B_d
-            
+
             if self.interpolation_alpha is not None and self.use_static and self.use_dynamic:
                 alpha = self.interpolation_alpha
                 # We need to separate terms to interpolate correctly
@@ -529,12 +541,25 @@ class HybridStructuralModel(nn.Module):
                 structural_term = alpha * s_term + (1 - alpha) * d_term
             else:
                  structural_term = term
-            
+
             # Update: eta = xi + structural_term
             eta = xi + structural_term
-            
+
             if torch.norm(eta - eta_old) < self.tol * (torch.norm(eta) + 1e-8):
+                converged = True
                 break
+
+        # Log warning if convergence failed
+        if not converged:
+            self._convergence_failures += 1
+            if self._convergence_failures <= 5 or self._convergence_failures % 100 == 0:
+                from ..logging_config import get_logger
+                logger = get_logger("layers.structural")
+                logger.warning(
+                    f"Fixed-point iteration failed to converge in {self.max_iter} iterations "
+                    f"(failure #{self._convergence_failures}). Consider: (1) using CompositeStructuralModel, "
+                    f"(2) increasing contraction penalty, or (3) reducing model complexity."
+                )
                 
         if return_attention:
             return eta, attn_weights

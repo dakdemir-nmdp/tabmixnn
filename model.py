@@ -702,8 +702,18 @@ class TabMixNN(nn.Module):
             if len(outputs) == 1:
                 return list(outputs.values())[0], attn
             return outputs, attn
-            
-        # Unified return: Return just outcomes to match standard Module behavior
+
+        # RETURN TYPE BEHAVIOR (for backward compatibility):
+        #   - Single outcome: Returns tensor (shape varies by family)
+        #   - Multiple outcomes: Returns dict {outcome_name: tensor}
+        #
+        # MIGRATION PATH (for future major version):
+        #   Consider always returning dict for consistency:
+        #   - Pro: Uniform API, easier to extend, explicit outcome names
+        #   - Con: Breaking change, requires updating all downstream code
+        #   - Alternative: Add `always_dict=False` parameter for opt-in migration
+        #
+        # Current implementation maintains backward compatibility with existing tests/examples.
         if len(outputs) == 1:
             return list(outputs.values())[0]
         return outputs
@@ -968,11 +978,19 @@ class TabMixNN(nn.Module):
         """
         if self.encoder is None or not hasattr(self.encoder, "variational_params"):
             return
-        
+
+        # Clear old random_intercept_embeddings_* attributes to prevent memory leak on multiple fit() calls
+        attrs_to_remove = [attr for attr in dir(self.encoder) if attr.startswith("random_intercept_embeddings_")]
+        for attr in attrs_to_remove:
+            try:
+                delattr(self.encoder, attr)
+            except AttributeError:
+                pass
+
         term_group_map = {}
         if self.design and getattr(self.design, "random_terms", None):
             term_group_map = {t.term_id: t.group_col for t in self.design.random_terms}
-        
+
         cov_modules = dict(getattr(self.encoder, "cov_modules", {}))
         wrappers = []
         
@@ -1182,6 +1200,17 @@ class TabMixNN(nn.Module):
                      print(f"    Manifold {i}: {m.grid_shape}, input={m.input_dim}, dim={m.manifold_dim}")
         else: print("  (Backbone not initialized)")
 
+        # Convergence diagnostics for HybridStructuralModel
+        print("\nConvergence Diagnostics:")
+        convergence_failures = self._get_convergence_failures()
+        if convergence_failures:
+            print("  WARNING: Fixed-point iteration convergence issues detected:")
+            for layer_name, failures in convergence_failures.items():
+                print(f"    {layer_name}: {failures} convergence failures")
+            print("  Consider: (1) CompositeStructuralModel, (2) increase contraction penalty, (3) reduce complexity")
+        else:
+            print("  No convergence issues detected")
+
     def extract_parameters(self, data=None, sample_size: int = 256, linearize: bool = True):
         """Return interpretable parameter estimates (fixed, random, variance components, structure)."""
         from .summary import parameter_estimates
@@ -1230,6 +1259,35 @@ class TabMixNN(nn.Module):
         if self.encoder is None:
             return {}
         return self.encoder.get_variance_summary()
+
+    def _get_convergence_failures(self):
+        """
+        Collect convergence failure counts from HybridStructuralModel layers.
+
+        Returns:
+            dict: {layer_name: failure_count} for layers with convergence issues
+        """
+        failures = {}
+
+        # Check backbone layers (GSEM architecture)
+        if self.backbone and hasattr(self.backbone, 'hidden_layers'):
+            for i, layer in enumerate(self.backbone.hidden_layers):
+                if hasattr(layer, 'structure') and layer.structure is not None:
+                    if hasattr(layer.structure, '_convergence_failures'):
+                        count = layer.structure._convergence_failures
+                        if count > 0:
+                            failures[f"backbone.layer_{i}.structure"] = count
+
+        # Check backbone manifolds (Manifold architecture)
+        if self.backbone and hasattr(self.backbone, 'manifolds'):
+            for i, manifold in enumerate(self.backbone.manifolds):
+                if hasattr(manifold, 'sem_layer') and manifold.sem_layer is not None:
+                    if hasattr(manifold.sem_layer, '_convergence_failures'):
+                        count = manifold.sem_layer._convergence_failures
+                        if count > 0:
+                            failures[f"backbone.manifold_{i}.sem"] = count
+
+        return failures
 
     def get_sparsity_loss(self):
         """Get sparsity loss from SEM/structural layers."""
@@ -1542,7 +1600,7 @@ class TabMixNN(nn.Module):
                         etl = incidence.sum(dim=1)  # Higher ETL = worse outcome = higher risk
                         pred = etl
                     else:
-                        print(f"DEBUG: Shape mismatch in SHAP predict! X:{X.shape}, pred:{pred.shape}")
+                        self.logger.debug(f"Shape mismatch in SHAP predict! X:{X.shape}, pred:{pred.shape}. Using mean aggregation as fallback.")
                         # Fallback: flatten?
                         pred = pred.mean(dim=1)
                 

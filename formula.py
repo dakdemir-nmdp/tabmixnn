@@ -267,7 +267,10 @@ class CompiledDesign:
         
         for term in self.random_terms:
             # 1. Group Indices
-            # 0 is reserved for unknown
+            # IMPORTANT: Index 0 is RESERVED for unknown/unseen groups
+            # - Training groups are mapped to indices 1, 2, 3, ...
+            # - Groups not in level_map receive index 0 (fillna(0))
+            # - The encoder uses this to apply unknown_strategy ("learned" or "zero")
             # Convert to object to avoid pandas Categorical fillna restriction
             group_vals = df[term.group_col].astype(object)
             indices = group_vals.map(term.level_map).fillna(0).astype(int).values
