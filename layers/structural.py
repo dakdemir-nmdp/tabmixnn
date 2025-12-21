@@ -189,6 +189,7 @@ class DynamicStructureModel(nn.Module):
         n_heads: int = 4,
         dropout: float = 0.0,
         causal_mask: bool = False,
+        feature_mixing: bool = False,
     ):
         super().__init__()
         
@@ -205,14 +206,58 @@ class DynamicStructureModel(nn.Module):
         self.head_dim = dim // n_heads
         self.scale = self.head_dim ** -0.5
         self.causal_mask = causal_mask
+        self.feature_mixing = feature_mixing
         
         # Projections
-        self.W_Q = nn.Linear(dim, dim, bias=False)
-        self.W_K = nn.Linear(dim, dim, bias=False)
-        self.W_V = nn.Linear(dim, dim, bias=False)
-        self.W_O = nn.Linear(dim, dim, bias=False)
+        
+        # Projections
+        if self.feature_mixing:
+             # Default to scalar features if not specified via method
+             # If user wants other dim, they should call enable_feature_mixing manually or we add args
+             self.input_feature_dim = 1
+             # We need to initialize for feature mixing
+             self.enable_feature_mixing(1) 
+        else:
+            self.W_Q = nn.Linear(dim, dim, bias=False)
+            self.W_K = nn.Linear(dim, dim, bias=False)
+            self.W_V = nn.Linear(dim, dim, bias=False)
+            self.W_O = nn.Linear(dim, dim, bias=False)
         
         self.dropout = nn.Dropout(dropout)
+
+
+    def enable_feature_mixing(self, feature_dim: int = 1):
+        """
+        Enable feature mixing mode where the input dimension D is treated as the sequence length.
+        The input features are assumed to be scalars (or vectors of size feature_dim).
+        
+        Input: [batch, D] or [batch, D, feature_dim]
+        Attention: computed over the D axis (D x D attention map).
+        """
+        self.feature_mixing = True
+        self.input_feature_dim = feature_dim
+        # Re-initialize projections for small feature_dim -> internal dim
+        # We need adequate internal dimension for heads
+        # Current projections are Linear(dim, dim) which assumes flat vector mixing? 
+        # No, standard attention preserves shape.
+        
+        # If we are in feature mixing mode:
+        # Input shape: [Batch, Sequence=Dim, Embedding=feature_dim]
+        # We want Output: [Batch, Sequence=Dim, Embedding=feature_dim]
+        
+        # We need to replace W_Q, W_K, W_V to project from feature_dim to (n_heads * head_dim)
+        # We generally keep head_dim * n_heads = dim? No, dim is the sequence length here.
+        # We need an internal 'model_dim' for the attention mechanism.
+        # Let's use 'dim' as the sequence length, and 'd_model' as the projection size.
+        
+        self.d_model = 32 # Arbitrary internal embedding size for features
+        self.head_dim = self.d_model // self.n_heads
+        self.scale = self.head_dim ** -0.5
+        
+        self.W_Q = nn.Linear(feature_dim, self.d_model, bias=False)
+        self.W_K = nn.Linear(feature_dim, self.d_model, bias=False)
+        self.W_V = nn.Linear(feature_dim, self.d_model, bias=False)
+        self.W_O = nn.Linear(self.d_model, feature_dim, bias=False)
         
     def forward(self, eta, return_weights=False):
         """
@@ -319,7 +364,47 @@ class DynamicStructureModel(nn.Module):
         # "xi = Gamma(backbone(X))".
         # If backbone returns sequence, then we have sequence.
         
+        # If mixing features (dim becomes sequence):
+        if self.feature_mixing:
+            if eta.dim() == 2:
+                # [batch, dim] -> [batch, dim, 1]
+                eta = eta.unsqueeze(-1)
+            return self._forward_feature_mixing(eta, return_weights)
+
         return self._forward_impl(eta, return_weights)
+
+    def _forward_feature_mixing(self, x, return_weights):
+        # x: [batch, seq=dim, feature_dim]
+        batch, seq, fdim = x.shape
+        
+        # Q, K, V: [batch, seq, n_heads * head_dim]
+        # view -> [batch, seq, n_heads, head_dim]
+        # permute -> [batch, n_heads, seq, head_dim]
+        Q = self.W_Q(x).view(batch, seq, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        K = self.W_K(x).view(batch, seq, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        V = self.W_V(x).view(batch, seq, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        
+        # Scores: [batch, heads, seq, seq]
+        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+        
+        weights = F.softmax(scores, dim=-1)
+        weights = self.dropout(weights)
+        
+        # [batch, heads, seq, head_dim]
+        attn_out = torch.matmul(weights, V)
+        
+        # [batch, seq, heads, head_dim] -> [batch, seq, d_model]
+        attn_out = attn_out.permute(0, 2, 1, 3).contiguous().view(batch, seq, self.d_model)
+        
+        # Project back to feature_dim
+        out = self.W_O(attn_out)
+        
+        if self.input_feature_dim == 1:
+            out = out.squeeze(-1)
+            
+        if return_weights:
+            return out, weights.mean(dim=1)
+        return out
 
     def _forward_impl(self, eta, return_weights):
         is_2d = eta.dim() == 2
@@ -476,6 +561,86 @@ class HybridStructuralModel(nn.Module):
              
         threshold = 1.0 - margin
         return F.relu(total_norm - threshold) ** 2
+
+
+class CompositeStructuralModel(nn.Module):
+    """
+    Robust structural model implementing the 'General Formulation' composition:
+    
+    1. Resolve Static Geometry: u = (I - B_s)^-1 xi
+    2. Dynamic Attention: a = Attn(u)
+    3. Fusion: h = G * u + (1-G) * a
+    
+    This avoids fixed-point instability and ensures clean identification.
+    """
+    def __init__(
+        self,
+        dim: int,
+        use_static: bool = True,
+        use_dynamic: bool = True,
+        static_config: Dict = None,
+        dynamic_config: Dict = None,
+        fusion_alpha: float = 0.5, # Default fusion weight
+        learnable_fusion: bool = True
+    ):
+        super().__init__()
+        self.dim = dim
+        self.use_static = use_static
+        self.use_dynamic = use_dynamic
+        
+        static_config = static_config or {}
+        dynamic_config = dynamic_config or {}
+        
+        if use_static:
+            self.B_static = StaticStructureModel(dim, **static_config)
+            
+        if use_dynamic:
+            self.B_dynamic = DynamicStructureModel(dim, **dynamic_config)
+            
+        # Fusion
+        if learnable_fusion:
+            # Sigmoid gate initialization
+            self.gate_logit = nn.Parameter(torch.tensor(0.0)) # Starts at 0.5
+            self.use_gate = True
+        else:
+            self.register_buffer('alpha', torch.tensor(fusion_alpha))
+            self.use_gate = False
+            
+    def forward(self, xi, return_attention=False):
+        # 1. Static Geometry
+        if self.use_static:
+            u = self.B_static.solve(xi)
+        else:
+            u = xi
+            
+        # 2. Dynamic Attention (moves within geometry)
+        attn_weights = None
+        if self.use_dynamic:
+            # Attends to 'u' (the resolved geometry)
+            a, attn_weights = self.B_dynamic(u, return_weights=True)
+        else:
+            a = u # No movement
+            
+        # 3. Fusion
+        if self.use_gate:
+            alpha = torch.sigmoid(self.gate_logit)
+        else:
+            alpha = self.alpha
+            
+        # h = alpha * u + (1 - alpha) * a
+        # (General Formulation uses alpha for static, 1-alpha for dynamic)
+        h = alpha * u + (1 - alpha) * a
+        
+        if return_attention:
+            return h, attn_weights
+        return h
+
+    def penalties(self):
+        p = {}
+        if self.use_static:
+            p['dag'] = self.B_static.dag_penalty()
+            p['sparsity'] = self.B_static.sparsity_penalty()
+        return p
 
 
 class RandomEffectsModule(nn.Module):

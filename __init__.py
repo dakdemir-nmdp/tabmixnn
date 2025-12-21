@@ -7,6 +7,11 @@ from .families import (
     MultivariateGaussian, MultiLabelBinomial, ContinuousSurvival
 )
 from .logging_config import set_log_level, disable_logging, enable_logging
+from .summary import summary, parameter_estimates
+
+# Add summary method to TabMixNN
+TabMixNN.summary = lambda self, **kwargs: summary(self, **kwargs)
+TabMixNN.extract_parameters = lambda self, **kwargs: parameter_estimates(self, **kwargs)
 
 # Legacy aliases - Pointing to Unified
 GeneralizedTabMixNN = TabMixNN 

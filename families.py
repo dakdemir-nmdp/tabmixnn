@@ -44,6 +44,11 @@ class Gaussian(Family):
     def n_params(self):
         # Only predict mean μ; σ is global and learned separately
         return 1
+    
+    @property
+    def sigma(self):
+        # Convenience accessor for std deviation
+        return torch.exp(self.log_sigma)
 
     def forward_params(self, eta):
         # eta is [batch, 1] -> mu only

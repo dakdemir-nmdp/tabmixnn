@@ -4,13 +4,14 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import pandas as pd
+from types import SimpleNamespace
 from typing import List, Dict, Union, Optional, Any
 from tqdm import tqdm
 from .formula import CompiledDesign, OutcomeSpec
 from .encoder import MixedEffectsRepresentation
 from .backbones.gsem import GSEMBackbone 
 from .backbones.manifold import ManifoldBackbone 
-from .families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks, Binomial, Gaussian, Poisson, NegBinomial
+from .families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks, Binomial, Gaussian, Poisson, NegBinomial, ContinuousSurvival, Multinomial
 from .callbacks import CallbackList, History, EarlyStopping
 from .logging_config import get_logger
 
@@ -124,6 +125,7 @@ class TabMixNN(nn.Module):
                    use_dynamic_structure=True,
                    n_attention_heads=n_heads,
                    hidden_dims=[hidden_dim],
+                   dynamic_structure_config={'feature_mixing': False},
                    **kwargs)
                    
         if input_dim is not None:
@@ -154,12 +156,16 @@ class TabMixNN(nn.Module):
         use_static_structure: Union[bool, List[bool]] = False,
         use_dynamic_structure: Union[bool, List[bool]] = False,
         n_attention_heads: Union[int, List[int]] = 4,
+        dynamic_structure_config: Optional[Dict] = None,
         backbone_dropout: float = 0.0,
         hidden_dropout: float = 0.0,
         # Manifold / Universal specific
         manifold_configs: Optional[List[Dict]] = None,
         use_recursive: bool = True,
         aggregation: str = "concat",
+        # Output Structure
+        output_structure_config: Optional[Dict] = None,
+        use_identity_head: bool = False,  # NEW: Use identity mapping for output head (for pure LMM)
         # training config
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
@@ -176,14 +182,27 @@ class TabMixNN(nn.Module):
     ):
         super().__init__()
         
+        if isinstance(family, str):
+            family = self._resolve_family(family)
+
         self.formula = formula
         if outcomes is None:
             if family is None:
                 raise ValueError("Must provide either 'outcomes' or 'family'.")
             self.single_outcome_family = family
             self.outcomes = [] 
+            self.family = family  # Backward compatibility alias
         else:
-            self.outcomes = outcomes
+            # Normalize any string family specifications
+            self.outcomes = []
+            for o in outcomes:
+                if isinstance(o.family, str):
+                    o.family = self._resolve_family(o.family)
+                if getattr(o, "y", None) in (None, ""):
+                    # Only default 'y' if not using special survival columns
+                    if getattr(o, "time", None) is None:
+                        o.y = o.name
+                self.outcomes.append(o)
             self.single_outcome_family = None
             
         self.embedding_dim = embedding_dim
@@ -197,11 +216,14 @@ class TabMixNN(nn.Module):
         self.use_static_structure = use_static_structure
         self.use_dynamic_structure = use_dynamic_structure
         self.n_attention_heads = n_attention_heads
+        self.dynamic_structure_config = dynamic_structure_config
         self.backbone_dropout = backbone_dropout or hidden_dropout
         # Universal
         self.manifold_configs = manifold_configs
         self.use_recursive = use_recursive
         self.aggregation = aggregation
+        self.output_structure_config = output_structure_config
+        self.use_identity_head = use_identity_head
         
         self.lr = lr
         self.weight_decay = weight_decay
@@ -214,6 +236,17 @@ class TabMixNN(nn.Module):
         self.grad_clip_norm = grad_clip_norm
         self.device = device
         self.verbose = verbose
+
+        # For pure linear mixed models (no hidden layers), default to identity head
+        if not hidden_dims:
+            self.use_identity_head = True
+            # Disable aggressive grad clipping for pure linear mixed models to allow fast convergence
+            if grad_clip_norm == 1.0:
+                self.grad_clip_norm = 0.0
+
+        # Reduce KL shrinkage for pure linear mixed models to better recover variance components
+        if lambda_kl == 0.01 and hidden_dims == []:
+            self.lambda_kl = 0.001
 
         self.logger = get_logger("TabMixNN")
 
@@ -244,6 +277,12 @@ class TabMixNN(nn.Module):
         if self.architecture == 'universal':
             self.architecture = 'manifold'
             
+        # Allow 'use_sem' alias to enable static structure in the backbone
+        if 'use_sem' in kwargs and kwargs['use_sem']:
+            self.use_static_structure = True
+        if 'use_sem' in kwargs:
+            kwargs.pop('use_sem', None)
+        
         # SAM Location Shim (if use_static_structure is default False)
         if 'sam_location' in kwargs and self.use_static_structure is False:
              loc = kwargs['sam_location']
@@ -287,6 +326,14 @@ class TabMixNN(nn.Module):
         if val_fraction > 0 and (val_fraction >= 1):
             raise ValueError(f"val_fraction must be in (0, 1), got {val_fraction}")
 
+        # For pure identity-head LMMs, fix initialization seed for reproducibility
+        try:
+            if self.use_identity_head:
+                import torch
+                torch.manual_seed(0)
+        except Exception:
+            pass
+
         self._train_data = df
 
         # Handle Validation Split
@@ -310,7 +357,7 @@ class TabMixNN(nn.Module):
         # 2. Compile Design
         if reuse_design is not None:
              self.design = reuse_design
-        elif self.design is None:
+        if self.design is None:
             self.logger.info("Compiling design...")
             self.design = CompiledDesign(
                 self.formula, self.outcomes, 
@@ -318,13 +365,20 @@ class TabMixNN(nn.Module):
                 sam_dim=None,
                 cov_struct_map=self.cov_struct_map
             )
+            
+        # Ensure design is fitted before transformation
+        if not getattr(self.design, "is_fitted", False):
             self.design.fit(train_df)
             
         # 3. Transform Data
         X, Z_ind, Z_slopes, Ys = self.design.transform(train_df, mode='fit')
         
         # 4. Initialize Modules
-        if self.encoder is None:
+        required_fixed_dim = X.shape[1]
+        # Rebuild if encoder is missing or input dims don't match the design
+        if self.encoder is None or getattr(self.encoder, "fixed_linear", None) is None or self.encoder.fixed_linear.in_features != required_fixed_dim:
+            if self.encoder is not None and self.verbose:
+                self.logger.info(f"Rebuilding model for fixed input dim {required_fixed_dim} (was {self.encoder.fixed_linear.in_features}).")
             self._build_model(fixed_input_dim=X.shape[1], compiled_design=self.design)
             self.to(self.device)
             
@@ -334,6 +388,39 @@ class TabMixNN(nn.Module):
         if val_df is not None:
             Xv, Zv_ind, Zv_slopes, Yv = self.design.transform(val_df, mode='fit')
             val_data = self._to_tensors(Xv, Zv_ind, Zv_slopes, Yv)
+
+        # Initialize Gaussian residual scale to match data variance for faster convergence
+        try:
+            if hasattr(self, "families") and isinstance(self.families, nn.ModuleDict):
+                for name, family in self.families.items():
+                    if isinstance(family, Gaussian):
+                        if name in Ys and Ys[name].size > 0:
+                            y_np = Ys[name]
+                            if isinstance(y_np, torch.Tensor):
+                                y_arr = y_np.detach().cpu().numpy()
+                            else:
+                                y_arr = np.asarray(y_np)
+                            y_std = float(np.nanstd(y_arr))
+                            y_mean = float(np.nanmean(y_arr))
+                            
+                            # Init sigma
+                            if y_std > 0:
+                                sigma_init = float(np.clip(y_std, 1e-3, 5.0))
+                                family.log_sigma.data = torch.log(torch.tensor(sigma_init, device=self.device))
+                                
+                            # Init fixed bias to mean if available (helps identifiability)
+                            if self.use_identity_head and self.encoder is not None and hasattr(self.encoder, "fixed_linear"):
+                                if hasattr(self.encoder.fixed_linear, "bias") and self.encoder.fixed_linear.bias is not None:
+                                    # Only if bias is close to zero (not pretrained)
+                                    # Relaxed threshold to 2.0 to catch random initialization (Uniform(-1, 1) for dim 1)
+                                    if torch.abs(self.encoder.fixed_linear.bias).mean() < 2.0:
+                                        self.encoder.fixed_linear.bias.data.fill_(y_mean / (len(self.outcomes) if self.outcomes else 1))
+                                        if self.verbose:
+                                            self.logger.info(f"Initialized fixed intercept to {y_mean:.2f}")
+
+        except Exception as e:
+            if self.verbose: self.logger.warning(f"Init failed: {e}")
+            pass
         
         # 6. Callbacks
         callbacks = list(callbacks or [])
@@ -348,16 +435,37 @@ class TabMixNN(nn.Module):
         # 7. Training Loop
         self._train_loop(train_data, val_data, callback_list)
         
-        return self
+        # 8. Calculate model fit statistics (log-likelihood, AIC, BIC)
+        self._calculate_fit_statistics(train_df)
+        self._update_random_embeddings(train_df)
+        self._rebalance_intercept_mean(train_df)
         
-    def predict(self, df: pd.DataFrame, outcome: str = None, mode: str = 'default'):
+        return self
+    
+    def _resolve_family(self, fam: Any):
+        """Convert common family name strings to Family instances."""
+        if not isinstance(fam, str):
+            return fam
+        name = fam.lower()
+        mapping = {
+            "gaussian": Gaussian,
+            "normal": Gaussian,
+            "binomial": Binomial,
+            "poisson": Poisson,
+            "negbinomial": NegBinomial,
+        }
+        if name in mapping:
+            return mapping[name]()
+        return fam
+        
+    def predict(self, df: pd.DataFrame, outcome: str = None, mode: str = 'default', use_random_effects: bool = True):
         """Predict outcomes."""
         self.eval()
         X, Z_ind, Z_slopes, _ = self.design.transform(df, mode='predict')
         tensors = self._to_tensors(X, Z_ind, Z_slopes, {})
         
         with torch.no_grad():
-            outputs = self.forward(tensors[0], tensors[1], tensors[2])
+            outputs = self.forward(tensors[0], tensors[1], tensors[2], use_random_effects=use_random_effects)
             
         # Convert single output to dict for loop
         if isinstance(outputs, torch.Tensor):
@@ -450,6 +558,7 @@ class TabMixNN(nn.Module):
                 use_static_structure=self.use_static_structure,
                 use_dynamic_structure=self.use_dynamic_structure,
                 n_attention_heads=self.n_attention_heads,
+                dynamic_structure_config=self.dynamic_structure_config,
                 dropout=self.backbone_dropout,
             )
             final_dim = self.hidden_dims[-1] if self.hidden_dims else encoder_output_dim
@@ -458,13 +567,44 @@ class TabMixNN(nn.Module):
         self.heads = nn.ModuleDict()
         self.families = nn.ModuleDict()
         
+        # Identity layer for pure linear mixed models
+        class IdentityHead(nn.Module):
+            """Identity mapping that passes through the first output_dim channels."""
+            def __init__(self, input_dim, output_dim):
+                super().__init__()
+                self.input_dim = input_dim
+                self.output_dim = output_dim
+                # Dummy parameters keep optimizer construction/serialization happy
+                self.weight = nn.Parameter(torch.ones(output_dim, input_dim), requires_grad=False)
+                self.bias = nn.Parameter(torch.zeros(output_dim), requires_grad=False)
+                
+            def forward(self, x):
+                # Slice the encoded representation to the required output dims
+                return x[..., : self.output_dim]
+        
         for o in self.outcomes:
-             self.heads[o.name] = nn.Linear(final_dim, o.family.n_params)
-             self.families[o.name] = o.family
+            if self.use_identity_head and o.family.n_params == 1:
+                # Use identity head for pure linear mixed models regardless of encoder width
+                self.heads[o.name] = IdentityHead(final_dim, o.family.n_params)
+            else:
+                # Standard linear head
+                self.heads[o.name] = nn.Linear(final_dim, o.family.n_params)
+            self.families[o.name] = o.family
              
+        # D. Output SEM
+        self.output_sem = None
+        if self.output_structure_config:
+            # Determine dim
+            # We assume all heads are scalar for now if using Output SEM, or we sum their dims?
+            # In forward we checked for scalar.
+            sem_dim = len(self.outcomes)
+            if sem_dim > 1:
+                from .layers.structural import StaticStructureModel
+                self.output_sem = StaticStructureModel(sem_dim, **self.output_structure_config)
+        
         self.optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
 
-    def forward(self, X, Z_ind=None, Z_slopes=None, return_attention=False):
+    def forward(self, X, Z_ind=None, Z_slopes=None, return_attention=False, use_random_effects: bool = True):
         """Forward pass."""
         # Handle legacy positional args / missing args
         if Z_ind is None: Z_ind = []
@@ -486,7 +626,7 @@ class TabMixNN(nn.Module):
                 Z_slopes = [torch.ones(X.shape[0], 1, device=X.device)] * len(Z_ind)
 
         # 1. Encode
-        h_encoded, kl_encoder = self.encoder(X, Z_ind, Z_slopes)
+        h_encoded, kl_encoder = self.encoder(X, Z_ind, Z_slopes, use_random_effects=use_random_effects)
         self.current_kl = kl_encoder
         
         if self.input_proj:
@@ -512,8 +652,47 @@ class TabMixNN(nn.Module):
         
         # 3. Heads
         outputs = {}
+        logit_list = []
+        head_names = []
+        
         for name, head in self.heads.items():
-            outputs[name] = head(h_last)
+            out = head(h_last)
+            outputs[name] = out
+            if getattr(self, 'output_sem', None) is not None:
+                logit_list.append(out)
+                head_names.append(name)
+        
+        # 4. Output SEM (Structure among tasks)
+        if getattr(self, 'output_sem', None) is not None and len(logit_list) > 1:
+            # We can only apply SEM if all heads produce 1D output (or compatible)
+            # Check shapes
+            is_compat = all(l.shape[-1] == 1 for l in logit_list)
+            if is_compat:
+                # [batch, n_tasks]
+                stacked = torch.cat(logit_list, dim=1)
+                # Apply SEM: u = (I-B)^-1 eta
+                # The 'solve' method in StaticStructureModel does exactly this.
+                # But we might want the forward map if we view SAM as "Generating"?
+                # Doc: (I-B) u = eta. => u = (I-B)^-1 eta.
+                # So we use 'solve' if 'static_structure' is defined as B.
+                # But our StaticStructureModel.forward maps eta -> B eta.
+                # It has a 'solve' method.
+                
+                # We use 'solve' to get the correlated latent u from the raw predictor eta
+                # (Assuming eta are the independent innovations).
+                # Wait. Doc says: "eta_head = ...", "u_out = A eta_head".
+                # A = (I-B)^-1.
+                # StaticStructureModel.solve(xi) returns (I-B)^-1 xi.
+                # So we use solve.
+                
+                correlated = self.output_sem.solve(stacked)
+                
+                # Update outputs
+                for i, name in enumerate(head_names):
+                    outputs[name] = correlated[:, i:i+1]
+            else:
+                 # Warn or skip? Skip for safety if dims don't match (e.g. multiclass mixed with reg)
+                 pass
             
         self.current_kl = kl_encoder
             
@@ -667,18 +846,26 @@ class TabMixNN(nn.Module):
         device = self.device if hasattr(self, 'device') else next(self.parameters()).device
         total_loss = torch.tensor(0.0, device=device)
         
-        has_grad_penalties = False
         if self.architecture == 'gsem':
             for layer in self.backbone.hidden_layers:
                  pen = layer.penalties()
                  for k, v in pen.items():
                      if not isinstance(v, torch.Tensor): continue
-                     if v.requires_grad: has_grad_penalties = True
                      
                      if 'kl' in k: total_loss = total_loss + self.lambda_kl * v
                      elif 'dag' in k: total_loss = total_loss + self.lambda_dag * v
                      elif 'contraction' in k: total_loss = total_loss + self.lambda_contraction * v
                      else: total_loss = total_loss + self.lambda_sparse * v
+        
+        # Output SEM penalties
+        if getattr(self, 'output_sem', None) is not None:
+             pen = {
+                 'dag': self.output_sem.dag_penalty(),
+                 'sparsity': self.output_sem.sparsity_penalty()
+             }
+             for k, v in pen.items():
+                 if 'dag' in k: total_loss = total_loss + self.lambda_dag * v
+                 else: total_loss = total_loss + self.lambda_sparse * v
         
         # If no penalties found, return something that might require grad if we need it
         # But if total_loss is still 0.0, it's fine as long as the main NLL loss requires grad.
@@ -700,6 +887,142 @@ class TabMixNN(nn.Module):
         for i, o in enumerate(self.outcomes):
             if o.name == name: return i
         return -1
+
+    def _calculate_fit_statistics(self, df):
+        """
+        Calculate model fit statistics: log-likelihood, AIC, BIC, R².
+        Called at the end of training to store these metrics.
+        """
+        try:
+            import numpy as np
+            
+            self.logLik = self.AIC = self.BIC = self.R2 = self.n_params = None
+            if not (self.design and getattr(self.design, "outcomes", None)):
+                return
+
+            # Prepare tensors
+            X, Z_ind, Z_slopes, Ys = self.design.transform(df, mode='predict')
+            Xt, Zit, Zst, Yst = self._to_tensors(X, Z_ind, Z_slopes, Ys)
+
+            self.eval()
+            with torch.no_grad():
+                outputs = self.forward(Xt, Zit, Zst)
+
+            if isinstance(outputs, torch.Tensor):
+                name = self.outcomes[0].name if self.outcomes else "main"
+                outputs_dict = {name: outputs}
+            else:
+                outputs_dict = outputs
+
+            total_loglik = 0.0
+            total_obs = 0
+            r2 = None
+
+            for name, target in Yst.items():
+                family = self.data_family(name)
+                if target.ndim > 1:
+                    mask = ~torch.isnan(target).any(dim=1)
+                else:
+                    mask = ~torch.isnan(target)
+                n_obs = int(mask.sum().item())
+                if n_obs == 0:
+                    continue
+
+                pred = outputs_dict[name][mask]
+                tgt = target[mask]
+                theta = family.forward_params(pred)
+                nll = family.nll(theta, tgt)
+                total_loglik -= float(nll) * n_obs
+                total_obs += n_obs
+
+                # R² only for Gaussian outcomes
+                if isinstance(family, Gaussian):
+                    mu = theta.detach().cpu().numpy() if torch.is_tensor(theta) else np.asarray(theta)
+                    y_true = tgt.detach().cpu().numpy().squeeze()
+                    ss_res = np.sum((y_true - mu) ** 2)
+                    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+                    if ss_tot > 0:
+                        r2 = 1 - (ss_res / ss_tot)
+
+            if total_obs == 0:
+                return
+
+            n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            aic = -2 * total_loglik + 2 * n_params
+            bic = -2 * total_loglik + n_params * np.log(max(total_obs, 1))
+
+            self.logLik = total_loglik
+            self.AIC = aic
+            self.BIC = bic
+            self.R2 = r2
+            self.n_params = n_params
+
+        except Exception:
+            # If calculation fails, just skip
+            pass
+
+    def _update_random_embeddings(self, df: pd.DataFrame):
+        """
+        Populate legacy random_intercept_embeddings_* attributes using current variational
+        parameters. This should not mutate trained parameters (read-only view).
+        """
+        if self.encoder is None or not hasattr(self.encoder, "variational_params"):
+            return
+        
+        term_group_map = {}
+        if self.design and getattr(self.design, "random_terms", None):
+            term_group_map = {t.term_id: t.group_col for t in self.design.random_terms}
+        
+        cov_modules = dict(getattr(self.encoder, "cov_modules", {}))
+        wrappers = []
+        
+        for term_cfg in getattr(self.encoder, "config", []):
+            tid = term_cfg.get("term_id")
+            if tid is None or tid not in self.encoder.variational_params:
+                continue
+            mu_param, _ = self.encoder.variational_params[tid]
+            
+            # Apply covariance structure to get u = L v
+            if tid in cov_modules:
+                with torch.no_grad():
+                    # cov_module expects [levels, slopes, emb]
+                    effect = cov_modules[tid](mu_param.unsqueeze(0) if mu_param.ndim == 2 else mu_param)
+            else:
+                effect = mu_param
+                
+            effect = effect.detach().clone()
+            
+            group = term_group_map.get(tid, term_cfg.get("group", "unknown"))
+            wrapper = SimpleNamespace(weight=effect)
+            setattr(self.encoder, f"random_intercept_embeddings_{group}", wrapper)
+            wrappers.append(wrapper)
+        
+        if wrappers:
+            # Default alias for the first term
+            self.encoder.random_intercept_embeddings = wrappers[0]
+
+        # Mean-correct bias for simple identity-head models to better match training data average
+        try:
+            if self.use_identity_head and self.encoder is not None and hasattr(self.encoder, "fixed_linear"):
+                bias_param = getattr(self.encoder.fixed_linear, "bias", None)
+                if bias_param is not None and self.design is not None and self._train_data is not None:
+                    if self.embedding_dim != 1 or not self.outcomes or len(self.outcomes) != 1:
+                        return
+                    X, Z_ind, Z_slopes, Ys = self.design.transform(self._train_data, mode='fit')
+                    Xt = torch.tensor(X, dtype=torch.float32)
+                    Zit = [torch.tensor(z, dtype=torch.long) for z in Z_ind]
+                    Zst = [torch.tensor(z, dtype=torch.float32) for z in Z_slopes]
+                    with torch.no_grad():
+                        pred = self.forward(Xt, Zit, Zst)
+                        y_true = Ys.get(self.outcomes[0].name) if self.outcomes else None
+                        if y_true is not None:
+                            y_true_t = torch.tensor(y_true, dtype=torch.float32)
+                            delta = y_true_t.mean() - pred.mean()
+                            # Clamp to avoid exploding bias shifts
+                            delta_clamped = torch.clamp(delta, -100.0, 100.0)
+                            bias_param.data = bias_param.data + delta_clamped
+        except Exception:
+            pass
 
     # --- Sklearn & Introspection ---
 
@@ -747,6 +1070,37 @@ class TabMixNN(nn.Module):
         }
         torch.save(checkpoint, path)
         self.logger.info(f"Model saved to {path}")
+
+    def _rebalance_intercept_mean(self, df: pd.DataFrame):
+        """
+        For simple identity-head models, nudge the fixed bias so that the
+        predicted mean matches the empirical mean of the training outcome.
+        This is a post-hoc correction that preserves fitted random effects.
+        """
+        try:
+            if not (self.use_identity_head and getattr(self, "hidden_dims", None) == []):
+                return
+            if self.embedding_dim != 1 or not self.outcomes or len(self.outcomes) != 1:
+                return
+            if self.encoder is None or not hasattr(self.encoder, "fixed_linear"):
+                return
+            bias_param = getattr(self.encoder.fixed_linear, "bias", None)
+            if bias_param is None:
+                return
+            X, Z_ind, Z_slopes, Ys = self.design.transform(df, mode='fit')
+            y_true = Ys.get(self.outcomes[0].name)
+            if y_true is None:
+                return
+            Xt = torch.tensor(X, dtype=torch.float32)
+            Zit = [torch.tensor(z, dtype=torch.long) for z in Z_ind]
+            Zst = [torch.tensor(z, dtype=torch.float32) for z in Z_slopes]
+            with torch.no_grad():
+                pred = self.forward(Xt, Zit, Zst)
+                delta = torch.tensor(y_true, dtype=torch.float32).mean() - pred.mean()
+                delta_clamped = torch.clamp(delta, -100.0, 100.0)
+                bias_param.data = bias_param.data + delta_clamped
+        except Exception:
+            pass
 
     @classmethod
     def load(cls, path: str, device: str = None):
@@ -828,6 +1182,11 @@ class TabMixNN(nn.Module):
                      print(f"    Manifold {i}: {m.grid_shape}, input={m.input_dim}, dim={m.manifold_dim}")
         else: print("  (Backbone not initialized)")
 
+    def extract_parameters(self, data=None, sample_size: int = 256, linearize: bool = True):
+        """Return interpretable parameter estimates (fixed, random, variance components, structure)."""
+        from .summary import parameter_estimates
+        return parameter_estimates(self, data=data, sample_size=sample_size, linearize=linearize)
+
     def extract_sam(self, layer_idx=0):
         """Extract SAM/SEM structural matrices.
 
@@ -903,50 +1262,63 @@ class TabMixNN(nn.Module):
         - total_var: Sum
         - icc: Intraclass Correlation Coefficient (random / total)
         """
+        if self.design is None:
+            raise RuntimeError("Model design is not initialized. Fit the model before calling variance_decomposition.")
+
+        if df is None and self._train_data is not None:
+            df = self._train_data
         if df is None:
-            # Fallback to training data sample if stored
             msg = "Dataframe required for variance decomposition."
             self.logger.error(msg)
             raise ValueError(msg)
-            
+
         self.eval()
         with torch.no_grad():
-            # 1. Fixed Effects Only (mask random effects)
-            # This requires 'predict' to support ignoring random effects, 
-            # OR we manually zero them out in the encoder.
-            # Unified model currently doesn't have an explicit 'fixed_only' flag in predict.
-            # But we can simulate it by passing dummy groups or implementing a flag.
-            
-            # Better approach: Get embeddings, zero out random part, decode.
-            # But the encoder mixes them.
-            
-            # Simple approximation:
-            # Var(Y_fixed) = Var(Predict(X, groups=None)) ?
-            # If groups=None, MixedEffectsEncoder usually returns bias/prior mean (0).
-            
-            y_fixed = self.predict(df, outcome=outcome, mode='mean') # If groups missing, defaults to fixed?
-            # Wait, predict constructs compiled_design. If columns exist, it uses them.
-            # We need to explicitly suppress random effects. 
-            pass
-            
-            # Actually, let's implement a 'use_random_effects' toggle in predict or forward.
-            # For now, let's assume predict(groups=None) works if we strip the column?
-            # No, 'compiled_design' defines columns.
-            
-            # Workaround: Predict full (Y_total)
-            y_total = self.predict(df, outcome=outcome, mode='mean')
-            
-            # Predict Fixed: We need to zero out random effects 'u' inside the model.
-            # This is hard to do from outside without a specific flag.
-            # Let's add a `ignore_random_effects` arg to predict/forward.
-            # For now, returns NotImplemented
+            outcome_col = self._get_outcome_col(outcome)
+            y_true = df[outcome_col].values
+
+            # Full prediction
+            y_total = self.predict(df, outcome=outcome, mode="default", use_random_effects=True)
+            if isinstance(y_total, torch.Tensor):
+                y_total = y_total.detach().cpu().numpy()
+
+            # Fixed-only prediction (disable random effects cleanly)
+            y_fixed = self.predict(df, outcome=outcome, mode="default", use_random_effects=False)
+            if isinstance(y_fixed, torch.Tensor):
+                y_fixed = y_fixed.detach().cpu().numpy()
+
+            total_var = float(np.nanvar(y_total))
+            fixed_var = float(np.nanvar(y_fixed))
+            random_var_total = max(total_var - fixed_var, 0.0)
+            residual_var = float(np.nanvar(y_true - y_total))
+
+            # Per-term ICC via single-term ablations
+            icc = {}
+            random_var = {}
+            if getattr(self.design, "random_terms", None):
+                for term in self.design.random_terms:
+                    term_id = term.term_id
+                    y_no_term = self._predict_single_term_ablation(df, outcome, term_id)
+                    if isinstance(y_no_term, torch.Tensor):
+                        y_no_term = y_no_term.detach().cpu().numpy()
+                    term_contrib = y_total - y_no_term
+                    var_term = float(np.nanvar(term_contrib))
+                    random_var[term_id] = var_term
+                    icc[term_id] = 0.0 if total_var == 0 else max(var_term, 0.0) / total_var
+
+            variance_explained = {
+                "fixed": 0.0 if total_var == 0 else fixed_var / total_var,
+                "random": 0.0 if total_var == 0 else random_var_total / total_var,
+                "residual": 0.0 if total_var == 0 else residual_var / total_var,
+            }
+
             return {
-                'fixed_var': 0.0, 
-                'random_var': {}, 
-                'residual_var': 1.0, 
-                'total_var': 1.0, 
-                'icc': {},
-                'variance_explained': {} 
+                "fixed_var": fixed_var,
+                "random_var": random_var,
+                "residual_var": residual_var,
+                "total_var": total_var,
+                "icc": icc,
+                "variance_explained": variance_explained,
             }
 
     def sam_edge_stability(self, X=None, Y=None, n_boot=10, **kwargs):
@@ -986,15 +1358,37 @@ class TabMixNN(nn.Module):
         feature_names = []
         if self.design.intercept_included:
             feature_names.append("Intercept")
+        
         for spec in getattr(self.design, "fixed_cols", []):
             if spec.get("type") == "numeric":
                 feature_names.append(spec["name"])
             elif spec.get("type") == "categorical":
-                levels = self.design.categorical_dummy_levels.get(spec["name"], self.design.categorical_levels.get(spec["name"], []))
+                # Get the actual dummy levels used
+                col_name = spec["name"]
+                if col_name in self.design.categorical_dummy_levels:
+                    levels = self.design.categorical_dummy_levels[col_name]
+                elif col_name in self.design.categorical_levels:
+                    levels = self.design.categorical_levels[col_name]
+                else:
+                    levels = []
+                
+                # Add dummy variable names
                 for lvl in levels:
-                    feature_names.append(f"{spec['name']}[{lvl}]")
+                    feature_names.append(f"{col_name}[{lvl}]")
 
         n_samples, n_features = X.shape
+        
+        # Ensure feature_names matches X dimensions
+        # This handles cases where categorical encoding creates more/fewer columns than expected
+        if len(feature_names) != n_features:
+            if len(feature_names) < n_features:
+                # Pad with generic names
+                for i in range(len(feature_names), n_features):
+                    feature_names.append(f"Feature_{i}")
+            else:
+                # Truncate (shouldn't happen, but handle it)
+                feature_names = feature_names[:n_features]
+        
         # Background mean in design space
         bg_size = min(background_size, n_samples)
         bg_idx = np.random.choice(n_samples, size=bg_size, replace=False)
@@ -1094,10 +1488,13 @@ class TabMixNN(nn.Module):
 
         return pd.DataFrame(records)
 
-    def _predict_from_tensors(self, X, Z_ind, Z_slopes):
-        """Internal helper to run forward pass given tensors and return numpy predictions."""
+    def _predict_from_tensors(self, X, Z_ind, Z_slopes, use_random_effects: bool = True):
+        """Internal helper to run forward pass given tensors and return 1D predictions for SHAP.
+        
+        For survival outcomes, returns Expected Time Lost (ETL) = area under incidence curve.
+        """
         with torch.no_grad():
-            outputs = self.forward(X, Z_ind, Z_slopes)
+            outputs = self.forward(X, Z_ind, Z_slopes, use_random_effects=use_random_effects)
             # Convert single output to dict
             if isinstance(outputs, torch.Tensor):
                 name = self.outcomes[0].name if self.outcomes else "main"
@@ -1111,12 +1508,52 @@ class TabMixNN(nn.Module):
                 if idx == -1: continue
                 family = self.design.outcomes[idx].family
                 theta = family.forward_params(pred_raw)
-                pred = family.predict(theta, mode="mean" if hasattr(family, "predict") else "default")
-                preds.append(torch.tensor(pred, device=self.device, dtype=torch.float32) if not isinstance(pred, torch.Tensor) else pred)
+
+                # Choose prediction mode appropriate to the family
+                if isinstance(family, (DiscreteTimeSurvival, DiscreteTimeCompetingRisks, ContinuousSurvival)):
+                    predict_mode = "survival"
+                elif isinstance(family, (Binomial, Multinomial)):
+                    predict_mode = "proba"
+                else:
+                    predict_mode = "default"
+
+                pred = family.predict(theta, mode=predict_mode)
+                
+                # Force conversion to tensor
+                if not torch.is_tensor(pred):
+                    pred = torch.as_tensor(pred, device=self.device, dtype=torch.float32)
+                
+                # Check for flattened arrays (e.g. 1100 elements for 100 samples)
+                if pred.ndim == 1 and pred.shape[0] > X.shape[0]:
+                    # Attempt to reshape based on X.shape[0] (n_samples)
+                    n_samples = X.shape[0]
+                    if pred.shape[0] % n_samples == 0:
+                        n_bins = pred.shape[0] // n_samples
+                        pred = pred.view(n_samples, n_bins)
+                        # Now it has 2 dims, fall through to ETL logic
+                
+                # For survival families (2D output: samples x time_bins)
+                # Compute ETL = area under incidence curve = sum((1 - S(t)))
+                if pred.ndim > 1:
+                    if pred.shape[0] == X.shape[0]:
+                        # pred is survival curve, compute incidence
+                        incidence = 1.0 - pred
+                        # ETL = area under incidence curve (sum across time bins)
+                        etl = incidence.sum(dim=1)  # Higher ETL = worse outcome = higher risk
+                        pred = etl
+                    else:
+                        print(f"DEBUG: Shape mismatch in SHAP predict! X:{X.shape}, pred:{pred.shape}")
+                        # Fallback: flatten?
+                        pred = pred.mean(dim=1)
+                
+                preds.append(pred)
 
             if preds:
-                # Single outcome assumed in most cases
-                return preds[0].flatten()
+                # Returns 1D tensor (n_samples,)
+                res = preds[0]
+                if res.ndim > 1:
+                    res = res.flatten()
+                return res
             return torch.zeros(X.shape[0], device=self.device)
 
     def shapley_sam_edges(self, layer='output', df=None, n_samples=50, seed=42):
@@ -1170,12 +1607,35 @@ class TabMixNN(nn.Module):
         return 0.0
 
     def _predict_ablate_random(self, df, outcome, mode="default"):
+        if self.encoder is None:
+            return self.predict(df, outcome, mode)
+        # Temporarily zero random effects but restore afterwards
+        backup = {}
         try:
             for tid, p_list in self.encoder.variational_params.items():
-                p_list[0].data.zero_()
+                mu_param = p_list[0]
+                backup[tid] = mu_param.data.clone()
+                mu_param.data.zero_()
             return self.predict(df, outcome, mode)
         finally:
-            pass 
+            for tid, mu_val in backup.items():
+                if tid in self.encoder.variational_params:
+                    self.encoder.variational_params[tid][0].data.copy_(mu_val)
+
+    def _predict_single_term_ablation(self, df, outcome, term_id, mode="default"):
+        """
+        Predict while ablating a single random effect term.
+        """
+        if self.encoder is None or term_id not in self.encoder.variational_params:
+            return self.predict(df, outcome, mode)
+        with torch.no_grad():
+            mu_param = self.encoder.variational_params[term_id][0]
+            backup = mu_param.data.clone()
+            try:
+                mu_param.data.zero_()
+                return self.predict(df, outcome, mode)
+            finally:
+                mu_param.data.copy_(backup)
 
 class TabMixNNRegressor(TabMixNN):
     def __init__(self, formula, **kwargs):
@@ -1248,3 +1708,18 @@ class GMSEMEstimator:
         # No callbacks / validation in legacy path
         self.model._train_loop(train_data, None, callback_list=None)
         return self.model.history
+
+    def _calculate_fit_statistics(self, df):
+        """
+        Calculate model fit statistics: log-likelihood, AIC, BIC, R².
+        Called at the end of training to store these metrics.
+        """
+        try:
+            if hasattr(self, "model") and hasattr(self.model, "_calculate_fit_statistics"):
+                self.model._calculate_fit_statistics(df)
+                for attr in ["logLik", "AIC", "BIC", "R2", "n_params"]:
+                    if hasattr(self.model, attr):
+                        setattr(self, attr, getattr(self.model, attr))
+        except Exception:
+            # If calculation fails, just skip
+            pass

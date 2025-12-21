@@ -204,6 +204,7 @@ class GSEMHiddenLayer(nn.Module):
         input_dim: int,
         output_dim: int,
         # Structure configuration
+        structure_type: str = 'composite', # 'composite' or 'iterative'
         use_static_structure: bool = False,
         use_dynamic_structure: bool = False,
         static_config: Optional[Dict] = None,
@@ -216,6 +217,7 @@ class GSEMHiddenLayer(nn.Module):
         activation: str = 'gelu',
         use_residual: bool = True,
         use_layer_norm: bool = True,
+        norm_position: str = 'pre_structure', # 'pre_structure' or 'post_structure'
         dropout: float = 0.0,
     ):
         super().__init__()
@@ -224,18 +226,33 @@ class GSEMHiddenLayer(nn.Module):
         self.output_dim = output_dim
         self.use_residual = use_residual and (input_dim == output_dim)
         self.use_layer_norm = use_layer_norm
+        self.norm_position = norm_position
         
         # Main linear transform: W @ H_in
         self.W = nn.Linear(input_dim, output_dim, bias=True)
         
         # Structural components (applies to output space)
         if use_static_structure or use_dynamic_structure:
-            self.structure = HybridStructuralModel(
+            from .structural import CompositeStructuralModel, HybridStructuralModel 
+            
+            # Re-import to be safe/clean
+            if structure_type == 'iterative':
+                ModelClass = HybridStructuralModel
+            else:
+                ModelClass = CompositeStructuralModel
+                
+            d_config = dynamic_config or {}
+            if 'feature_mixing' not in d_config:
+                d_config['feature_mixing'] = True
+            if 'n_heads' not in d_config:
+                d_config['n_heads'] = n_attention_heads
+
+            self.structure = ModelClass(
                 dim=output_dim,
                 use_static=use_static_structure,
                 use_dynamic=use_dynamic_structure,
                 static_config=static_config or {},
-                dynamic_config=dynamic_config or {'n_heads': n_attention_heads},
+                dynamic_config=d_config,
             )
         else:
             self.structure = None
@@ -290,6 +307,10 @@ class GSEMHiddenLayer(nn.Module):
             re = self.random_effects(group_indices.to(self.W.weight.device))
             xi = xi + self.re_proj(re)
         
+        # Normalization: Pre-structure (Separation of Scales)
+        if self.layer_norm is not None and self.norm_position == 'pre_structure':
+            xi = self.layer_norm(xi)
+
         # Apply structural transformation: H = (I - B_s - B_d)^{-1} xi
         attn_weights = None
         if self.structure is not None:
@@ -306,8 +327,8 @@ class GSEMHiddenLayer(nn.Module):
         # Activation: σ(H)
         H_out = self.activation(H_out)
         
-        # Layer normalization
-        if self.layer_norm is not None:
+        # Normalization: Post-structure (Legacy / Standard MLP)
+        if self.layer_norm is not None and self.norm_position == 'post_structure':
             H_out = self.layer_norm(H_out)
         
         # Residual connection: H_out = H_out + H_in

@@ -37,6 +37,7 @@ class CompiledDesign:
         self.sam_location = sam_location
         self.sam_dim = sam_dim
         self.cov_struct_map = cov_struct_map or {}
+        self.is_fitted = False
         
         # Fixed effects state
         self.fixed_cols = []
@@ -59,6 +60,7 @@ class CompiledDesign:
         # 3. Process Random Effects
         self._fit_random(df, random_parts)
         
+        self.is_fitted = True
         return self
 
     def transform(self, df, mode='predict'):
@@ -111,6 +113,10 @@ class CompiledDesign:
         if '-1' in fixed_terms:
             fixed_terms.remove('-1')
             intercept = False
+        # A standalone "1" indicates an intercept and should not be treated as a column
+        fixed_terms = [t for t in fixed_terms if t != '1']
+        # We rely on bias for intercept; do not include explicit intercept column
+        self.intercept_included = False
             
         # Parse random terms
         random_terms_spec = []
@@ -148,7 +154,8 @@ class CompiledDesign:
         return {'terms': fixed_terms, 'intercept': intercept}, random_terms_spec
 
     def _fit_fixed(self, df, fixed_part):
-        self.intercept_included = fixed_part['intercept']
+        # Use bias for intercept; do not include explicit intercept column
+        self.intercept_included = False
         
         # Identify types
         self.fixed_cols = []
@@ -160,10 +167,9 @@ class CompiledDesign:
                 raise ValueError(f"Column {col_name} not found in dataframe.")
             
             if pd.api.types.is_numeric_dtype(df[col_name]):
-                # Store stats for standardization
+                # Store stats (kept for compatibility), but we keep raw scale for interpretability
                 mu = df[col_name].mean()
-                sigma = df[col_name].std()
-                if sigma == 0: sigma = 1.0
+                sigma = df[col_name].std() if df[col_name].std() != 0 else 1.0
                 self.numeric_transformer_params[col_name] = (mu, sigma)
                 self.fixed_cols.append({'name': col_name, 'type': 'numeric'})
             else:
@@ -180,18 +186,13 @@ class CompiledDesign:
 
     def _transform_fixed(self, df):
         parts = []
-        
-        if self.intercept_included:
-            parts.append(np.ones((len(df), 1)))
             
         for spec in self.fixed_cols:
             col = spec['name']
             if spec['type'] == 'numeric':
                 mu, sigma = self.numeric_transformer_params[col]
-                # fillna? Blueprint says drop missing by default. 
-                # Assuming df is clean or we fill 0 after standardization.
-                vals = (df[col].fillna(mu) - mu) / sigma
-                parts.append(vals.values.reshape(-1, 1))
+                vals = df[col].fillna(mu).values.reshape(-1, 1)
+                parts.append(vals)
             else:
                 # Categorical
                 levels = self.categorical_levels[col]

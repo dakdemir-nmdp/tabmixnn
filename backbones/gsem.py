@@ -32,6 +32,7 @@ class GSEMBackbone(TabMixNNBackbone):
         use_static_structure: Union[bool, List[bool]] = False,
         use_dynamic_structure: Union[bool, List[bool]] = False,
         n_attention_heads: Union[int, List[int]] = 4,
+        dynamic_structure_config: Optional[Dict] = None,
         activations: Union[str, List[str]] = 'gelu',
         use_residual: Union[bool, List[bool]] = True,
         use_layer_norm: Union[bool, List[bool]] = True,
@@ -56,17 +57,27 @@ class GSEMBackbone(TabMixNNBackbone):
         use_ln = broadcast(use_layer_norm, n_layers)
         drops = broadcast(dropout, n_layers)
         
+        # Prepare dynamic config base
+        base_heatmap_config = dynamic_structure_config or {}
+        
         # Hidden layers
         self.hidden_layers = nn.ModuleList()
         current_dim = input_dim
         for l in range(n_layers):
             out_dim = hidden_dims[l]
+            # Merge heads into config
+            d_config = base_heatmap_config.copy()
+            # If heads not in config, use arg
+            if 'n_heads' not in d_config:
+                d_config['n_heads'] = n_heads[l]
+                
             layer = GSEMHiddenLayer(
                 input_dim=current_dim,
                 output_dim=out_dim,
                 use_static_structure=use_static[l],
                 use_dynamic_structure=use_dynamic[l],
-                n_attention_heads=n_heads[l],
+                n_attention_heads=n_heads[l], # Still passing, but layer prefers config if present
+                dynamic_config=d_config,
                 activation=acts[l],
                 use_residual=use_res[l],
                 use_layer_norm=use_ln[l],

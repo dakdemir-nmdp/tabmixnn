@@ -3,6 +3,8 @@ import torch.nn as nn
 import numpy as np
 from .kernels import rbf_kernel
 
+import torch.nn.functional as F
+
 class CovarianceStructure(nn.Module):
     """
     Abstract base class for covariance structures L_t(theta).
@@ -140,7 +142,7 @@ class UnstructuredSlopeCovariance(CovarianceStructure):
         # v: [levels, slopes, emb]
         # Build Cholesky with positive diagonals
         tril = torch.tril(self.raw_lower)
-        diag = torch.diag(torch.softplus(torch.diag(self.raw_lower)) + 1e-3)
+        diag = torch.diag(F.softplus(torch.diag(self.raw_lower)) + 1e-3)
         L = tril - torch.diag(torch.diag(tril)) + diag  # replace diag with softplus
 
         levels, _, emb = v.shape
@@ -175,7 +177,7 @@ class KroneckerCovariance(CovarianceStructure):
         # v: [levels, slopes, emb]
         # Compute L_slope
         tril = torch.tril(self.raw_lower_slope)
-        diag = torch.diag(torch.softplus(torch.diag(self.raw_lower_slope)) + self.jitter)
+        diag = torch.diag(F.softplus(torch.diag(self.raw_lower_slope)) + self.jitter)
         L_slope = tril - torch.diag(torch.diag(tril)) + diag  # [slopes, slopes]
 
         # Cholesky of K_group
@@ -228,10 +230,11 @@ class GPCovariance(CovarianceStructure):
             out.append(K)
         return torch.stack(out)
 
-    def forward(self, v_train, indices):
+    def forward(self, v_train, indices=None):
         """
         v_train: [n_train_levels, n_slopes, emb] variational means for training levels
         indices: [batch] integer codes from design (0 is unknown; 1..n_levels map into full_levels)
+                 If None, returns embeddings for all full_levels.
         """
         sigma = torch.exp(self.log_sigma).view(self.n_slopes)  # [slopes]
         K_full = self._kernel_full(self.log_lengthscale)  # [slopes, L, L]
@@ -255,6 +258,9 @@ class GPCovariance(CovarianceStructure):
 
             u_pred = K_cross @ alpha  # [n_levels, emb]
             u_all[:, s, :] = u_pred
+
+        if indices is None:
+            return u_all
 
         # Gather batch rows with UNK padding at 0
         idx_adj = torch.clamp(indices, min=0)
@@ -351,10 +357,11 @@ class KCovariance(CovarianceStructure):
 
         self.log_sigma = nn.Parameter(torch.zeros(n_slopes, 1))
 
-    def forward(self, v_train, indices):
+    def forward(self, v_train, indices=None):
         """
         v_train: [n_train_levels, n_slopes, emb] variational means for training levels only
         indices: [batch] integers from design (0 is unknown; 1..n_levels map into full_levels)
+                 If None, returns embeddings for all full_levels.
         """
         sigma = torch.exp(self.log_sigma).view(1, self.n_slopes, 1)
         # v_train scaled per slope
@@ -370,6 +377,9 @@ class KCovariance(CovarianceStructure):
         # Predict all levels (including train) via K_cross @ alpha
         # K_cross: [n_full, n_train]
         u_all = torch.einsum("lt, tse -> lse", self.K_cross, alpha)
+
+        if indices is None:
+            return u_all
 
         # Gather batch rows; indices 0 are unknown -> zero row
         idx_adj = indices.clone()

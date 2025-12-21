@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
+from types import SimpleNamespace
 
 from .formula import CompiledDesign
 from .layers.sem import SEMLayer
@@ -161,7 +162,23 @@ class MixedEffectsRepresentation(nn.Module):
             if self.unknown_strategy == "learned":
                 self.unknown_params[tid] = nn.Parameter(torch.zeros(1, n_slopes, embedding_dim))
 
-    def forward(self, X, Z_indices, Z_slopes):
+            # Backward compatibility: expose variational means as embedding-like accessors
+            self._register_compat_embedding(group_name, tid)
+
+        # Default alias for first random effect if present
+        if len(random_terms_config) > 0 and not hasattr(self, "random_intercept_embeddings"):
+            first_tid = random_terms_config[0]['term_id']
+            self.random_intercept_embeddings = SimpleNamespace(weight=self.variational_params[first_tid][0])
+
+    def _register_compat_embedding(self, group_name: str, term_id: str):
+        """Expose mu parameters with a .weight attribute for legacy tests."""
+        if term_id not in self.variational_params:
+            return
+        mu_param = self.variational_params[term_id][0]
+        wrapper = SimpleNamespace(weight=mu_param)
+        setattr(self, f"random_intercept_embeddings_{group_name}", wrapper)
+
+    def forward(self, X, Z_indices, Z_slopes, use_random_effects: bool = True):
         # X: [batch, fixed_dim]
         # Z_indices: list of [batch] indices
         # Z_slopes: list of [batch, n_slopes]
@@ -175,52 +192,53 @@ class MixedEffectsRepresentation(nn.Module):
         kl_elems = 0
         n_terms = max(len(self.config), 1)
         
-        for i, term in enumerate(self.config):
-            tid = term['term_id']
-            indices = Z_indices[i] # [batch]
-            slopes_val = Z_slopes[i] # [batch, n_slopes]
-            
-            mu, log_s = self.variational_params[tid]
-            
-            # KL divergence: q(v) vs N(0, I)
-            s = torch.exp(log_s)
-            var = s**2
-            kl = 0.5 * (var + mu**2 - 1 - 2*log_s).sum()
-            kl_sum = kl_sum + kl
-            kl_elems += (mu.numel() + log_s.numel())
-            
-            if self.training:
-                noise = torch.randn_like(mu)
-                v_input = mu + noise * torch.exp(log_s)
-            else:
-                # Use mean at evaluation time for deterministic predictions
-                v_input = mu
-            
-            # Apply Covariance Structure L
-            cov_module = self.cov_modules[tid]
-            if isinstance(cov_module, (KCovariance, GPCovariance)):
-                u_expected = cov_module(v_input, indices)  # already [batch, slopes, emb]
-                if self.unknown_strategy == "learned":
-                    unknown_row = self.unknown_params[tid]
+        if use_random_effects:
+            for i, term in enumerate(self.config):
+                tid = term['term_id']
+                indices = Z_indices[i] # [batch]
+                slopes_val = Z_slopes[i] # [batch, n_slopes]
+                
+                mu, log_s = self.variational_params[tid]
+                
+                # KL divergence: q(v) vs N(0, I)
+                s = torch.exp(log_s)
+                var = s**2
+                kl = 0.5 * (var + mu**2 - 1 - 2*log_s).sum()
+                kl_sum = kl_sum + kl
+                kl_elems += (mu.numel() + log_s.numel())
+                
+                if self.training:
+                    noise = torch.randn_like(mu)
+                    v_input = mu + noise * torch.exp(log_s)
                 else:
-                    unknown_row = u_expected.mean(dim=0, keepdim=True)
-                if (indices == 0).any():
-                    u_expected = u_expected.clone()
-                    u_expected[indices == 0] = unknown_row
-                gathered_u = u_expected
-            else:
-                u_expected = cov_module(v_input) # [levels, slopes, emb]
-                # Reserve index 0 for unseen groups -> configurable strategy
-                if self.unknown_strategy == "learned":
-                    unknown_row = self.unknown_params[tid]
+                    # Use mean at evaluation time for deterministic predictions
+                    v_input = mu
+                
+                # Apply Covariance Structure L
+                cov_module = self.cov_modules[tid]
+                if isinstance(cov_module, (KCovariance, GPCovariance)):
+                    u_expected = cov_module(v_input, indices)  # already [batch, slopes, emb]
+                    if self.unknown_strategy == "learned":
+                        unknown_row = self.unknown_params[tid]
+                    else:
+                        unknown_row = u_expected.mean(dim=0, keepdim=True)
+                    if (indices == 0).any():
+                        u_expected = u_expected.clone()
+                        u_expected[indices == 0] = unknown_row
+                    gathered_u = u_expected
                 else:
-                    unknown_row = u_expected.mean(dim=0, keepdim=True)
-                u_padded = torch.cat([unknown_row, u_expected], dim=0)
-                gathered_u = u_padded.index_select(0, indices.clamp(min=0))
-            
-            # Weighted sum
-            term_contrib = (gathered_u * slopes_val.unsqueeze(-1)).sum(dim=1)
-            random_out += term_contrib
+                    u_expected = cov_module(v_input) # [levels, slopes, emb]
+                    # Reserve index 0 for unseen groups -> configurable strategy
+                    if self.unknown_strategy == "learned":
+                        unknown_row = self.unknown_params[tid]
+                    else:
+                        unknown_row = u_expected.mean(dim=0, keepdim=True)
+                    u_padded = torch.cat([unknown_row, u_expected], dim=0)
+                    gathered_u = u_padded.index_select(0, indices.clamp(min=0))
+                
+                # Weighted sum
+                term_contrib = (gathered_u * slopes_val.unsqueeze(-1)).sum(dim=1)
+                random_out += term_contrib
             
         kl_out = kl_sum / max(kl_elems, 1) if self.kl_normalize else kl_sum
         random_out_scaled = random_out / n_terms if self.scale_random_by_terms else random_out
