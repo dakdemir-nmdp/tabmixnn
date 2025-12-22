@@ -31,7 +31,17 @@ class MixedEffectsRepresentation(nn.Module):
             * "zero": Uses mean of training group embeddings
         - This affects ALL random effect terms and is applied during forward()
     """
-    def __init__(self, fixed_input_dim, embedding_dim, random_terms_config, cov_struct_map=None, kl_normalize=True, scale_random_by_terms=False, unknown_strategy="learned"):
+    def __init__(
+        self,
+        fixed_input_dim,
+        embedding_dim,
+        random_terms_config,
+        cov_struct_map=None,
+        kl_normalize=True,
+        scale_random_by_terms=False,
+        unknown_strategy="learned",
+        use_fixed_bias=True,
+    ):
         """
         Args:
             fixed_input_dim: Dimension of fixed effects input
@@ -44,7 +54,7 @@ class MixedEffectsRepresentation(nn.Module):
         """
         super().__init__()
         # Fixed part
-        self.fixed_linear = nn.Linear(fixed_input_dim, embedding_dim)
+        self.fixed_linear = nn.Linear(fixed_input_dim, embedding_dim, bias=use_fixed_bias)
         self.kl_normalize = kl_normalize
         self.scale_random_by_terms = scale_random_by_terms
         self.unknown_strategy = unknown_strategy
@@ -318,6 +328,9 @@ def _build_random_config(design: CompiledDesign) -> List[Dict[str, Any]]:
 
 
 def _infer_fixed_input_dim(design: CompiledDesign) -> int:
+    if getattr(design, "design_info", None) is not None:
+        return design.design_info.matrix_shape[1]
+
     dim = 1 if design.intercept_included else 0
     for spec in design.fixed_cols:
         if spec["type"] == "numeric":
@@ -365,6 +378,7 @@ class MixedEffectsEncoder(nn.Module):
             cov_struct_map=cov_struct_map,
             kl_normalize=True,  # Hardcoded optimal default
             scale_random_by_terms=False,  # Hardcoded optimal default
+            use_fixed_bias=not compiled_design.intercept_included,
         )
 
         self.mixed_activation = None  # Hardcoded: no activation after mixed block

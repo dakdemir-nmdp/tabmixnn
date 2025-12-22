@@ -2,6 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
 import numpy as np
 import pandas as pd
 from types import SimpleNamespace
@@ -14,6 +15,27 @@ from .backbones.manifold import ManifoldBackbone
 from .families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks, Binomial, Gaussian, Poisson, NegBinomial, ContinuousSurvival, Multinomial
 from .callbacks import CallbackList, History, EarlyStopping
 from .logging_config import get_logger
+
+
+class TabMixDataset(Dataset):
+    """Streaming-friendly container for fixed/random design components."""
+    def __init__(self, X, Z_ind, Z_slopes, Ys):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.Z_ind = [torch.tensor(z, dtype=torch.long) for z in Z_ind]
+        self.Z_slopes = [torch.tensor(z, dtype=torch.float32) for z in Z_slopes]
+        self.Ys = {k: torch.tensor(v, dtype=torch.float32) for k, v in Ys.items()}
+
+    def __len__(self):
+        return self.X.shape[0]
+
+    def __getitem__(self, idx):
+        # Each item returns per-sample views; DataLoader will collate to batches.
+        return (
+            self.X[idx],
+            [z[idx] for z in self.Z_ind],
+            [z[idx] for z in self.Z_slopes],
+            {k: v[idx] for k, v in self.Ys.items()},
+        )
 
 class TabMixNN(nn.Module):
     """
@@ -164,6 +186,8 @@ class TabMixNN(nn.Module):
         use_recursive: bool = True,
         aggregation: str = "concat",
         # Output Structure
+        output_sem_mode: str = 'none',  # 'none', 'lavaan', 'learned'
+        output_structure: Optional[str] = None,  # lavaan equations (if mode='lavaan')
         output_structure_config: Optional[Dict] = None,
         use_identity_head: bool = False,  # NEW: Use identity mapping for output head (for pure LMM)
         # training config
@@ -222,9 +246,17 @@ class TabMixNN(nn.Module):
         self.manifold_configs = manifold_configs
         self.use_recursive = use_recursive
         self.aggregation = aggregation
+        self.output_sem_mode = output_sem_mode
+        self.output_structure = output_structure
         self.output_structure_config = output_structure_config
         self.use_identity_head = use_identity_head
-        
+
+        # Validate output SEM configuration early
+        if output_sem_mode == 'lavaan' and output_structure is None:
+            raise ValueError("output_structure required for output_sem_mode='lavaan'")
+        if output_sem_mode not in ['none', 'lavaan', 'learned']:
+            raise ValueError(f"Invalid output_sem_mode: {output_sem_mode}. Must be 'none', 'lavaan', or 'learned'.")
+
         self.lr = lr
         self.weight_decay = weight_decay
         self.batch_size = batch_size
@@ -383,11 +415,11 @@ class TabMixNN(nn.Module):
             self.to(self.device)
             
         # 5. Prepare Tensors
-        train_data = self._to_tensors(X, Z_ind, Z_slopes, Ys)
+        train_data = TabMixDataset(X, Z_ind, Z_slopes, Ys)
         val_data = None
         if val_df is not None:
             Xv, Zv_ind, Zv_slopes, Yv = self.design.transform(val_df, mode='fit')
-            val_data = self._to_tensors(Xv, Zv_ind, Zv_slopes, Yv)
+            val_data = TabMixDataset(Xv, Zv_ind, Zv_slopes, Yv)
 
         # Initialize Gaussian residual scale to match data variance for faster convergence
         try:
@@ -458,38 +490,57 @@ class TabMixNN(nn.Module):
             return mapping[name]()
         return fam
         
-    def predict(self, df: pd.DataFrame, outcome: str = None, mode: str = 'default', use_random_effects: bool = True):
-        """Predict outcomes."""
+    def predict(self, df: pd.DataFrame, outcome: str = None, mode: str = 'default', use_random_effects: bool = True, as_dict: Optional[bool] = None):
+        """
+        Predict outcomes.
+
+        Args:
+            outcome: Optional outcome name to select.
+            mode: Family-specific prediction mode.
+            use_random_effects: Toggle random effects contribution.
+            as_dict: If True returns dict; if False returns first/selected output array;
+                     if None uses legacy behavior (unwrap single outcome).
+        """
         self.eval()
         X, Z_ind, Z_slopes, _ = self.design.transform(df, mode='predict')
-        tensors = self._to_tensors(X, Z_ind, Z_slopes, {})
-        
-        with torch.no_grad():
-            outputs = self.forward(tensors[0], tensors[1], tensors[2], use_random_effects=use_random_effects)
-            
-        # Convert single output to dict for loop
-        if isinstance(outputs, torch.Tensor):
-            name = self.outcomes[0].name if self.outcomes else "main"
-            outputs_dict = {name: outputs}
-        else:
-            outputs_dict = outputs
-            
-        results = {}
-        for name, pred_raw in outputs_dict.items():
-            idx = self._outcome_idx(name)
-            if idx == -1: continue
-            family = self.design.outcomes[idx].family
-            theta = family.forward_params(pred_raw)
-            results[name] = family.predict(theta, mode=mode)
-            
+        results = self._predict_batches(X, Z_ind, Z_slopes, mode=mode, use_random_effects=use_random_effects)
+
         if outcome:
-            return results[outcome]
-        if len(results) == 1 and outcome is None:
+            return results.get(outcome)
+        unwrap = as_dict is False or (as_dict is None and len(results) == 1)
+        if unwrap and len(results) == 1:
             return list(results.values())[0]
         return results
 
-    def predict_proba(self, df, outcome=None):
-        return self.predict(df, outcome=outcome, mode='proba')
+    def _predict_batches(self, X, Z_ind, Z_slopes, mode="default", use_random_effects: bool = True):
+        dataset = TabMixDataset(X, Z_ind, Z_slopes, {})
+        loader, _ = self._make_dataloader(dataset, shuffle=False)
+        buffers: Dict[str, List[torch.Tensor]] = {}
+        with torch.no_grad():
+            for batch in loader:
+                bx, bz_ind, bz_slopes, _ = self._move_batch_to_device(batch)
+                outputs = self.forward(bx, bz_ind, bz_slopes, use_random_effects=use_random_effects)
+                outputs_dict = self._ensure_dict_outputs(outputs)
+                for name, pred_raw in outputs_dict.items():
+                    idx = self._outcome_idx(name)
+                    if idx == -1:
+                        continue
+                    family = self.design.outcomes[idx].family
+                    theta = family.forward_params(pred_raw)
+                    pred = family.predict(theta, mode=mode)
+                    if not torch.is_tensor(pred):
+                        pred = torch.as_tensor(pred, device=self.device, dtype=torch.float32)
+                    buffers.setdefault(name, []).append(pred.detach().cpu())
+
+        results = {}
+        for name, parts in buffers.items():
+            if not parts:
+                continue
+            results[name] = torch.cat(parts, dim=0).numpy()
+        return results
+
+    def predict_proba(self, df, outcome=None, as_dict: Optional[bool] = None):
+        return self.predict(df, outcome=outcome, mode='proba', as_dict=as_dict)
 
     def score(self, df, outcome=None):
         metrics = self._evaluate_performance(df, outcome)
@@ -518,7 +569,8 @@ class TabMixNN(nn.Module):
              cov_struct_map=self.cov_struct_map,
              kl_normalize=True,
              scale_random_by_terms=self.scale_random_by_terms,
-             unknown_strategy=self.unknown_strategy
+             unknown_strategy=self.unknown_strategy,
+             use_fixed_bias=not getattr(compiled_design, "intercept_included", False)
         )
         
         encoder_output_dim = self.embedding_dim
@@ -591,18 +643,81 @@ class TabMixNN(nn.Module):
                 self.heads[o.name] = nn.Linear(final_dim, o.family.n_params)
             self.families[o.name] = o.family
              
-        # D. Output SEM
+        # D. Output SEM (Three modes: none, lavaan, learned)
         self.output_sem = None
-        if self.output_structure_config:
-            # Determine dim
-            # We assume all heads are scalar for now if using Output SEM, or we sum their dims?
-            # In forward we checked for scalar.
+        if self.output_sem_mode != 'none' and len(self.outcomes) > 1:
+            from .layers.structural import StaticStructureModel
             sem_dim = len(self.outcomes)
-            if sem_dim > 1:
-                from .layers.structural import StaticStructureModel
-                self.output_sem = StaticStructureModel(sem_dim, **self.output_structure_config)
+
+            if self.output_sem_mode == 'lavaan':
+                # Parse lavaan equations and create fixed structure
+                # (validation already done in __init__)
+                from .lavaan_parser import LavanParser
+                outcome_names = [o.name for o in self.outcomes]
+                spec = LavanParser.parse(self.output_structure)
+                init_B = LavanParser.to_adjacency(spec, outcome_names)
+
+                # Fixed structure: B is non-learnable
+                config = self.output_structure_config or {}
+                self.output_sem = StaticStructureModel(
+                    sem_dim,
+                    init_structure=init_B,
+                    learnable=False,
+                    **config
+                )
+            elif self.output_sem_mode == 'learned':
+                # Learned structure: B is fully learnable
+                config = self.output_structure_config or {}
+                self.output_sem = StaticStructureModel(
+                    sem_dim,
+                    learnable=True,
+                    **config
+                )
+            # Note: invalid modes already caught in __init__
+
+        # Backward compatibility: old API with output_structure_config only
+        elif self.output_structure_config and len(self.outcomes) > 1:
+            from .layers.structural import StaticStructureModel
+            sem_dim = len(self.outcomes)
+            self.output_sem = StaticStructureModel(sem_dim, **self.output_structure_config)
+            self.output_sem_mode = 'learned'  # Infer mode for backward compatibility
         
         self.optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+
+    def _ensure_dict_outputs(self, outputs):
+        """Normalize forward outputs to a dict keyed by outcome name."""
+        if isinstance(outputs, torch.Tensor):
+            name = self.outcomes[0].name if self.outcomes else "main"
+            return {name: outputs}
+        return outputs
+
+    def _make_dataloader(self, data, shuffle=False):
+        """Create a DataLoader from a dataset/tuple while keeping tensors on CPU."""
+        if isinstance(data, DataLoader):
+            return data, len(data.dataset)
+        if isinstance(data, TabMixDataset):
+            dataset = data
+        elif isinstance(data, tuple):
+            dataset = TabMixDataset(*data)
+        else:
+            dataset = TabMixDataset(*data)
+        loader = DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            drop_last=False,
+            pin_memory=self.device.startswith("cuda"),
+        )
+        return loader, len(dataset)
+
+    def _move_batch_to_device(self, batch):
+        """Send a collated batch to the configured device."""
+        X, Z_ind, Z_slopes, Ys = batch
+        X = X.to(self.device)
+        Z_ind = [z.to(self.device) for z in Z_ind]
+        Z_slopes = [z.to(self.device) for z in Z_slopes]
+        Ys = {k: v.to(self.device) for k, v in Ys.items()}
+        return X, Z_ind, Z_slopes, Ys
 
     def forward(self, X, Z_ind=None, Z_slopes=None, return_attention=False, use_random_effects: bool = True):
         """Forward pass."""
@@ -652,47 +767,44 @@ class TabMixNN(nn.Module):
         
         # 3. Heads
         outputs = {}
-        logit_list = []
-        head_names = []
-        
-        for name, head in self.heads.items():
-            out = head(h_last)
-            outputs[name] = out
-            if getattr(self, 'output_sem', None) is not None:
-                logit_list.append(out)
-                head_names.append(name)
-        
+
         # 4. Output SEM (Structure among tasks)
-        if getattr(self, 'output_sem', None) is not None and len(logit_list) > 1:
-            # We can only apply SEM if all heads produce 1D output (or compatible)
-            # Check shapes
-            is_compat = all(l.shape[-1] == 1 for l in logit_list)
-            if is_compat:
-                # [batch, n_tasks]
-                stacked = torch.cat(logit_list, dim=1)
-                # Apply SEM: u = (I-B)^-1 eta
-                # The 'solve' method in StaticStructureModel does exactly this.
-                # But we might want the forward map if we view SAM as "Generating"?
-                # Doc: (I-B) u = eta. => u = (I-B)^-1 eta.
-                # So we use 'solve' if 'static_structure' is defined as B.
-                # But our StaticStructureModel.forward maps eta -> B eta.
-                # It has a 'solve' method.
-                
-                # We use 'solve' to get the correlated latent u from the raw predictor eta
-                # (Assuming eta are the independent innovations).
-                # Wait. Doc says: "eta_head = ...", "u_out = A eta_head".
-                # A = (I-B)^-1.
-                # StaticStructureModel.solve(xi) returns (I-B)^-1 xi.
-                # So we use solve.
-                
-                correlated = self.output_sem.solve(stacked)
-                
-                # Update outputs
-                for i, name in enumerate(head_names):
-                    outputs[name] = correlated[:, i:i+1]
-            else:
-                 # Warn or skip? Skip for safety if dims don't match (e.g. multiclass mixed with reg)
-                 pass
+        # Split primary and auxiliary parameters for multi-parameter families
+        if getattr(self, 'output_sem', None) is not None and len(self.heads) > 1:
+            primary_scores = []  # [batch, 1] per outcome
+            auxiliary_params = {}  # name -> [batch, p_k-1] tensor
+            head_names = []
+
+            for name, head in self.heads.items():
+                raw_output = head(h_last)  # [batch, n_params]
+
+                # Extract primary parameter (always first column by convention)
+                primary = raw_output[:, 0:1]  # [batch, 1]
+                primary_scores.append(primary)
+                head_names.append(name)
+
+                # Store auxiliary if multi-parameter
+                if self.families[name].n_params > 1:
+                    auxiliary_params[name] = raw_output[:, 1:]  # [batch, p_k-1]
+
+            # Apply SEM to primary parameters: μ = (I - B)^{-1} η
+            stacked_primary = torch.cat(primary_scores, dim=1)  # [batch, K]
+            correlated = self.output_sem.solve(stacked_primary)  # [batch, K]
+
+            # Reconstruct full parameter vectors
+            for i, name in enumerate(head_names):
+                μ_correlated = correlated[:, i:i+1]  # [batch, 1]
+
+                if name in auxiliary_params:
+                    # Multi-param: combine correlated primary + independent auxiliary
+                    outputs[name] = torch.cat([μ_correlated, auxiliary_params[name]], dim=1)
+                else:
+                    # Scalar: just correlated primary
+                    outputs[name] = μ_correlated
+        else:
+            # No SEM: standard pass-through
+            for name, head in self.heads.items():
+                outputs[name] = head(h_last)
             
         self.current_kl = kl_encoder
             
@@ -719,9 +831,11 @@ class TabMixNN(nn.Module):
         return outputs
 
     def _train_loop(self, train_data, val_data, callback_list: Optional[CallbackList] = None):
-        X, Z_ind, Z_slopes, Ys = train_data
-        n_samples = len(X)
-        n_batches = (n_samples + self.batch_size - 1) // self.batch_size
+        train_loader, n_samples = self._make_dataloader(train_data, shuffle=True)
+        val_loader = None
+        if val_data:
+            val_loader, _ = self._make_dataloader(val_data, shuffle=False)
+
         self.stop_training = False
         callbacks = callback_list or CallbackList()
 
@@ -733,39 +847,23 @@ class TabMixNN(nn.Module):
             pbar = None
             epoch_iterator = range(self.epochs)
 
-        callbacks.on_train_begin({"epochs": self.epochs, "batches": n_batches})
+        callbacks.on_train_begin({"epochs": self.epochs, "batches": len(train_loader)})
 
         for epoch in epoch_iterator:
             self.train()
             epoch_loss = 0
-            
-            # Shuffle indices
-            indices = torch.randperm(n_samples, device=self.device)
-            
+
             callbacks.on_epoch_begin(epoch, {"epoch": epoch})
 
-            for i in range(n_batches):
+            for i, batch in enumerate(train_loader):
                 callbacks.on_batch_begin(i, {"batch": i})
 
-                start_idx = i * self.batch_size
-                end_idx = min(start_idx + self.batch_size, n_samples)
-                batch_indices = indices[start_idx:end_idx]
-                
-                bx = X[batch_indices]
-                bz_ind = [z[batch_indices] for z in Z_ind]
-                bz_slopes = [z[batch_indices] for z in Z_slopes]
-                bys = {k: v[batch_indices] for k, v in Ys.items()}
-                
+                bx, bz_ind, bz_slopes, bys = self._move_batch_to_device(batch)
+
                 self.optimizer.zero_grad()
                 outputs = self.forward(bx, bz_ind, bz_slopes)
+                outputs_dict = self._ensure_dict_outputs(outputs)
                 kl = self.current_kl
-                
-                # Convert single output to dict for loop
-                if isinstance(outputs, torch.Tensor):
-                    name = self.outcomes[0].name if self.outcomes else "main"
-                    outputs_dict = {name: outputs}
-                else:
-                    outputs_dict = outputs
 
                 loss = torch.tensor(0.0, device=bx.device)
                 count = 0
@@ -775,41 +873,44 @@ class TabMixNN(nn.Module):
                         mask = ~torch.isnan(target).any(dim=1)
                     else:
                         mask = ~torch.isnan(target)
-                    if mask.sum() == 0: continue
+                    if mask.sum() == 0:
+                        continue
                     pred = outputs_dict[name][mask]
                     tgt = target[mask]
                     theta = family.forward_params(pred)
                     loss = loss + family.nll(theta, tgt)
                     count += 1
-                
-                if count > 0: loss = loss / count
-                
+
+                if count > 0:
+                    loss = loss / count
+
                 if kl is not None:
-                    loss = loss + self.lambda_kl * kl * (len(bx) / n_samples)
-                
+                    loss = loss + self.lambda_kl * kl * (len(bx) / max(n_samples, 1))
+
                 loss = loss + self._structural_penalties()
-                
+
                 loss.backward()
                 if self.grad_clip_norm > 0:
                     torch.nn.utils.clip_grad_norm_(self.parameters(), self.grad_clip_norm)
                 self.optimizer.step()
                 epoch_loss += loss.item()
                 callbacks.on_batch_end(i, {"batch": i, "batch_loss": loss.item()})
-                
-            train_avg = epoch_loss / n_batches
+
+            train_avg = epoch_loss / max(len(train_loader), 1)
             self.history.append(train_avg)
-            
+
             val_loss = None
-            if val_data:
-                val_loss = self._evaluate_loss(val_data)
+            if val_loader is not None:
+                val_loss = self._evaluate_loss(val_loader)
                 self.val_history.append(val_loss)
                 callbacks.on_validation_end({"val_loss": val_loss})
-                        
+
             if self.verbose and pbar is not None:
-                 msg = f"loss={train_avg:.4f}"
-                 if val_loss: msg += f", val_loss={val_loss:.4f}"
-                 pbar.set_postfix_str(msg)
-            
+                msg = f"loss={train_avg:.4f}"
+                if val_loss is not None:
+                    msg += f", val_loss={val_loss:.4f}"
+                pbar.set_postfix_str(msg)
+
             logs = {"loss": train_avg}
             if val_loss is not None:
                 logs["val_loss"] = val_loss
@@ -821,34 +922,39 @@ class TabMixNN(nn.Module):
                 break
 
         callbacks.on_train_end(logs if 'logs' in locals() else None)
-                
+
     def _evaluate_loss(self, data):
+        """Evaluate average loss over a dataset/loader without moving entire data to device."""
+        loader, _ = self._make_dataloader(data, shuffle=False)
         self.eval()
-        X, Z_ind, Z_slopes, Ys = data
+        total_loss = 0.0
+        n_batches = 0
         with torch.no_grad():
-            outputs = self.forward(X, Z_ind, Z_slopes)
-            
-            # Convert single output to dict for loop
-            if isinstance(outputs, torch.Tensor):
-                name = self.outcomes[0].name if self.outcomes else "main"
-                outputs_dict = {name: outputs}
-            else:
-                outputs_dict = outputs
-                
-            loss = 0
-            count = 0
-            for name, target in Ys.items():
-                family = self.data_family(name)
-                if target.ndim > 1: mask = ~torch.isnan(target).any(dim=1)
-                else: mask = ~torch.isnan(target)
-                if mask.sum() == 0: continue
-                pred = outputs_dict[name][mask]
-                tgt = target[mask]
-                theta = family.forward_params(pred)
-                loss += family.nll(theta, tgt)
-                count += 1
-            if count > 0: loss /= count
-            return loss.item()
+            for batch in loader:
+                bx, bz_ind, bz_slopes, Ys = self._move_batch_to_device(batch)
+                outputs = self.forward(bx, bz_ind, bz_slopes)
+                outputs_dict = self._ensure_dict_outputs(outputs)
+
+                loss = torch.tensor(0.0, device=bx.device)
+                count = 0
+                for name, target in Ys.items():
+                    family = self.data_family(name)
+                    if target.ndim > 1:
+                        mask = ~torch.isnan(target).any(dim=1)
+                    else:
+                        mask = ~torch.isnan(target)
+                    if mask.sum() == 0:
+                        continue
+                    pred = outputs_dict[name][mask]
+                    tgt = target[mask]
+                    theta = family.forward_params(pred)
+                    loss += family.nll(theta, tgt)
+                    count += 1
+                if count > 0:
+                    loss = loss / count
+                total_loss += loss.item()
+                n_batches += 1
+        return total_loss / max(n_batches, 1)
 
     def _structural_penalties(self):
         # We must ensure this returns a tensor that requires grad if any of its components do,
@@ -886,11 +992,12 @@ class TabMixNN(nn.Module):
         idx = self._outcome_idx(name)
         return self.design.outcomes[idx].family
 
-    def _to_tensors(self, X, Z_ind, Z_slopes, Ys):
-        Xt = torch.tensor(X, dtype=torch.float32).to(self.device)
-        Zit = [torch.tensor(z, dtype=torch.long).to(self.device) for z in Z_ind]
-        Zst = [torch.tensor(z, dtype=torch.float32).to(self.device) for z in Z_slopes]
-        Yst = {k: torch.tensor(v, dtype=torch.float32).to(self.device) for k,v in Ys.items()}
+    def _to_tensors(self, X, Z_ind, Z_slopes, Ys, device=None):
+        device = device or self.device
+        Xt = torch.tensor(X, dtype=torch.float32, device=device)
+        Zit = [torch.tensor(z, dtype=torch.long, device=device) for z in Z_ind]
+        Zst = [torch.tensor(z, dtype=torch.float32, device=device) for z in Z_slopes]
+        Yst = {k: torch.tensor(v, dtype=torch.float32, device=device) for k,v in Ys.items()}
         return Xt, Zit, Zst, Yst
 
     def _outcome_idx(self, name):
@@ -905,54 +1012,51 @@ class TabMixNN(nn.Module):
         """
         try:
             import numpy as np
-            
+
             self.logLik = self.AIC = self.BIC = self.R2 = self.n_params = None
             if not (self.design and getattr(self.design, "outcomes", None)):
                 return
 
-            # Prepare tensors
+            # Prepare streaming loader
             X, Z_ind, Z_slopes, Ys = self.design.transform(df, mode='predict')
-            Xt, Zit, Zst, Yst = self._to_tensors(X, Z_ind, Z_slopes, Ys)
-
-            self.eval()
-            with torch.no_grad():
-                outputs = self.forward(Xt, Zit, Zst)
-
-            if isinstance(outputs, torch.Tensor):
-                name = self.outcomes[0].name if self.outcomes else "main"
-                outputs_dict = {name: outputs}
-            else:
-                outputs_dict = outputs
+            data_loader, _ = self._make_dataloader(TabMixDataset(X, Z_ind, Z_slopes, Ys), shuffle=False)
 
             total_loglik = 0.0
             total_obs = 0
-            r2 = None
+            gaussian_stats = {"sum_y": 0.0, "sum_y2": 0.0, "ss_res": 0.0, "n": 0}
 
-            for name, target in Yst.items():
-                family = self.data_family(name)
-                if target.ndim > 1:
-                    mask = ~torch.isnan(target).any(dim=1)
-                else:
-                    mask = ~torch.isnan(target)
-                n_obs = int(mask.sum().item())
-                if n_obs == 0:
-                    continue
+            self.eval()
+            with torch.no_grad():
+                for batch in data_loader:
+                    bx, bz_ind, bz_slopes, Ybatch = self._move_batch_to_device(batch)
+                    outputs = self.forward(bx, bz_ind, bz_slopes)
+                    outputs_dict = self._ensure_dict_outputs(outputs)
 
-                pred = outputs_dict[name][mask]
-                tgt = target[mask]
-                theta = family.forward_params(pred)
-                nll = family.nll(theta, tgt)
-                total_loglik -= float(nll) * n_obs
-                total_obs += n_obs
+                    for name, target in Ybatch.items():
+                        family = self.data_family(name)
+                        if target.ndim > 1:
+                            mask = ~torch.isnan(target).any(dim=1)
+                        else:
+                            mask = ~torch.isnan(target)
+                        n_obs = int(mask.sum().item())
+                        if n_obs == 0:
+                            continue
 
-                # R² only for Gaussian outcomes
-                if isinstance(family, Gaussian):
-                    mu = theta.detach().cpu().numpy() if torch.is_tensor(theta) else np.asarray(theta)
-                    y_true = tgt.detach().cpu().numpy().squeeze()
-                    ss_res = np.sum((y_true - mu) ** 2)
-                    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
-                    if ss_tot > 0:
-                        r2 = 1 - (ss_res / ss_tot)
+                        pred = outputs_dict[name][mask]
+                        tgt = target[mask]
+                        theta = family.forward_params(pred)
+                        nll = family.nll(theta, tgt)
+                        total_loglik -= float(nll) * n_obs
+                        total_obs += n_obs
+
+                        # R² only for Gaussian outcomes
+                        if isinstance(family, Gaussian):
+                            mu = theta.detach().cpu().numpy() if torch.is_tensor(theta) else np.asarray(theta)
+                            y_true = tgt.detach().cpu().numpy().squeeze()
+                            gaussian_stats["n"] += n_obs
+                            gaussian_stats["sum_y"] += float(y_true.sum())
+                            gaussian_stats["sum_y2"] += float((y_true ** 2).sum())
+                            gaussian_stats["ss_res"] += float(np.sum((y_true - mu) ** 2))
 
             if total_obs == 0:
                 return
@@ -964,8 +1068,13 @@ class TabMixNN(nn.Module):
             self.logLik = total_loglik
             self.AIC = aic
             self.BIC = bic
-            self.R2 = r2
             self.n_params = n_params
+
+            if gaussian_stats["n"] > 0:
+                mean_y = gaussian_stats["sum_y"] / gaussian_stats["n"]
+                ss_tot = gaussian_stats["sum_y2"] - gaussian_stats["n"] * (mean_y ** 2)
+                if ss_tot > 0:
+                    self.R2 = 1 - (gaussian_stats["ss_res"] / ss_tot)
 
         except Exception:
             # If calculation fails, just skip
@@ -1082,7 +1191,7 @@ class TabMixNN(nn.Module):
         checkpoint = {
             'state_dict': self.state_dict(),
             'params': self.get_params(),
-            'design': self.design,
+            'design_state': self.design.export_state() if self.design else None,
             'history': self.history,
             'val_history': self.val_history,
         }
@@ -1145,20 +1254,29 @@ class TabMixNN(nn.Module):
         model = cls(**params)
         
         # Restore design and rebuild model
-        model.design = checkpoint['design']
+        design_state = checkpoint.get('design_state')
+        model.design = None
+        if design_state:
+            from .formula import CompiledDesign
+            model.design = CompiledDesign.restore_from_state(design_state)
+        elif checkpoint.get('design'):
+            # Backward compatibility for old checkpoints
+            model.design = checkpoint.get('design')
+
         if model.design:
-            # Calculate fixed input dimension from design
-            n_fixed = 1  # At minimum for intercept
-            if hasattr(model.design, 'fixed_cols'):
-                n_fixed = len(model.design.fixed_cols)
-                # Add space for dummies
-                for col_spec in model.design.fixed_cols:
-                    if col_spec.get('type') == 'categorical':
-                        col_name = col_spec.get('name')
-                        if col_name in model.design.categorical_dummy_levels:
-                            n_fixed += len(model.design.categorical_dummy_levels[col_name]) - 1
-                if model.design.intercept_included:
-                    n_fixed += 1
+            if getattr(model.design, "design_info", None) is not None:
+                n_fixed = len(getattr(model.design.design_info, "column_names", []))
+            else:
+                n_fixed = 1  # At minimum for intercept
+                if hasattr(model.design, 'fixed_cols'):
+                    n_fixed = len(model.design.fixed_cols)
+                    for col_spec in model.design.fixed_cols:
+                        if col_spec.get('type') == 'categorical':
+                            col_name = col_spec.get('name')
+                            if col_name in model.design.categorical_dummy_levels:
+                                n_fixed += len(model.design.categorical_dummy_levels[col_name]) - 1
+                    if model.design.intercept_included:
+                        n_fixed += 1
             model._build_model(fixed_input_dim=n_fixed, compiled_design=model.design)
             
         # Load state dict (strict=False to handle family parameter differences)
@@ -1336,12 +1454,12 @@ class TabMixNN(nn.Module):
             y_true = df[outcome_col].values
 
             # Full prediction
-            y_total = self.predict(df, outcome=outcome, mode="default", use_random_effects=True)
+            y_total = self.predict(df, outcome=outcome, mode="default", use_random_effects=True, as_dict=False)
             if isinstance(y_total, torch.Tensor):
                 y_total = y_total.detach().cpu().numpy()
 
             # Fixed-only prediction (disable random effects cleanly)
-            y_fixed = self.predict(df, outcome=outcome, mode="default", use_random_effects=False)
+            y_fixed = self.predict(df, outcome=outcome, mode="default", use_random_effects=False, as_dict=False)
             if isinstance(y_fixed, torch.Tensor):
                 y_fixed = y_fixed.detach().cpu().numpy()
 
@@ -1553,12 +1671,7 @@ class TabMixNN(nn.Module):
         """
         with torch.no_grad():
             outputs = self.forward(X, Z_ind, Z_slopes, use_random_effects=use_random_effects)
-            # Convert single output to dict
-            if isinstance(outputs, torch.Tensor):
-                name = self.outcomes[0].name if self.outcomes else "main"
-                outputs_dict = {name: outputs}
-            else:
-                outputs_dict = outputs
+            outputs_dict = self._ensure_dict_outputs(outputs)
 
             preds = []
             for name, pred_raw in outputs_dict.items():
@@ -1638,6 +1751,10 @@ class TabMixNN(nn.Module):
         if self.design is None:
             return []
         # Try different attributes
+        if hasattr(self.design, 'fixed_feature_names') and self.design.fixed_feature_names:
+            return self.design.fixed_feature_names
+        if getattr(self.design, "design_info", None) is not None:
+            return list(self.design.design_info.column_names)
         if hasattr(self.design, 'feature_names'):
             return self.design.feature_names
         if hasattr(self.design, 'X_cols'):
@@ -1649,7 +1766,7 @@ class TabMixNN(nn.Module):
     def _evaluate_performance(self, df, outcome):
         spec = next((o for o in self.outcomes if o.name == (outcome or self.outcomes[0].name)), None)
         if not spec: return 0.0
-        preds = self.predict(df, outcome=spec.name)
+        preds = self.predict(df, outcome=spec.name, as_dict=False)
         if hasattr(spec, 'get_target_cols'): y_true = df[spec.get_target_cols()[0]].values
         else: return 0.0
         fam = spec.family
@@ -1659,14 +1776,14 @@ class TabMixNN(nn.Module):
              return r2_score(y_true[mask], preds[mask])
         elif isinstance(fam, Binomial):
              from sklearn.metrics import roc_auc_score
-             preds_prob = self.predict_proba(df, outcome=spec.name)
+             preds_prob = self.predict_proba(df, outcome=spec.name, as_dict=False)
              mask = ~np.isnan(y_true)
              return roc_auc_score(y_true[mask], preds_prob[mask])
         return 0.0
 
     def _predict_ablate_random(self, df, outcome, mode="default"):
         if self.encoder is None:
-            return self.predict(df, outcome, mode)
+            return self.predict(df, outcome, mode, as_dict=False)
         # Temporarily zero random effects but restore afterwards
         backup = {}
         try:
@@ -1674,7 +1791,7 @@ class TabMixNN(nn.Module):
                 mu_param = p_list[0]
                 backup[tid] = mu_param.data.clone()
                 mu_param.data.zero_()
-            return self.predict(df, outcome, mode)
+            return self.predict(df, outcome, mode, as_dict=False)
         finally:
             for tid, mu_val in backup.items():
                 if tid in self.encoder.variational_params:
@@ -1685,13 +1802,13 @@ class TabMixNN(nn.Module):
         Predict while ablating a single random effect term.
         """
         if self.encoder is None or term_id not in self.encoder.variational_params:
-            return self.predict(df, outcome, mode)
+            return self.predict(df, outcome, mode, as_dict=False)
         with torch.no_grad():
             mu_param = self.encoder.variational_params[term_id][0]
             backup = mu_param.data.clone()
             try:
                 mu_param.data.zero_()
-                return self.predict(df, outcome, mode)
+                return self.predict(df, outcome, mode, as_dict=False)
             finally:
                 mu_param.data.copy_(backup)
 

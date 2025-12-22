@@ -12,6 +12,30 @@ class Family(nn.Module):
     def n_params(self):
         raise NotImplementedError
 
+    @property
+    def primary_param_index(self) -> int:
+        """
+        Index of the primary parameter that participates in output-level SEM.
+        For multitask learning, only primary parameters (location/mean) are correlated;
+        auxiliary parameters (dispersion, shape) remain independent.
+        Default: 0 (first parameter).
+        """
+        return 0
+
+    @property
+    def primary_param_name(self) -> str:
+        """
+        Semantic name of the primary parameter for documentation and interpretation.
+        Must be implemented by each family.
+
+        Examples:
+            - Gaussian: "mean"
+            - NegBinomial: "log_mean"
+            - Binomial: "log_odds"
+            - ContinuousSurvival: "log_hazard_ratio"
+        """
+        raise NotImplementedError
+
     def forward_params(self, eta):
         """Transform raw neural output eta to distribution parameters theta."""
         raise NotImplementedError
@@ -44,7 +68,11 @@ class Gaussian(Family):
     def n_params(self):
         # Only predict mean μ; σ is global and learned separately
         return 1
-    
+
+    @property
+    def primary_param_name(self) -> str:
+        return "mean"
+
     @property
     def sigma(self):
         # Convenience accessor for std deviation
@@ -81,6 +109,10 @@ class Binomial(Family):
     def n_params(self):
         return 1
 
+    @property
+    def primary_param_name(self) -> str:
+        return "log_odds"
+
     def forward_params(self, eta):
         return eta.squeeze(-1) # Logits
 
@@ -106,6 +138,10 @@ class Poisson(Family):
     def n_params(self):
         return 1
 
+    @property
+    def primary_param_name(self) -> str:
+        return "log_rate"
+
     def forward_params(self, eta):
         # eta is log_rate
         return eta.squeeze(-1)
@@ -126,6 +162,10 @@ class NegBinomial(Family):
     @property
     def n_params(self):
         return 2 # log_mu, log_alpha
+
+    @property
+    def primary_param_name(self) -> str:
+        return "log_mean"
 
     def forward_params(self, eta):
         return eta[:, 0], eta[:, 1]
@@ -184,10 +224,14 @@ class DiscreteTimeSurvival(Family):
     def __init__(self, time_bins):
         super().__init__()
         self.time_bins = np.array(time_bins)
-        
+
     @property
     def n_params(self):
         return len(self.time_bins)
+
+    @property
+    def primary_param_name(self) -> str:
+        return "logit_hazard_t0"
 
     def forward_params(self, eta):
         # eta: [n, T] logits for hazard
@@ -273,6 +317,10 @@ class DiscreteTimeCompetingRisks(Family):
     def n_params(self):
         # logits for each cause at each time
         return len(self.time_bins) * self.num_causes
+
+    @property
+    def primary_param_name(self) -> str:
+        return "logit_hazard_t0_cause1"
 
     def forward_params(self, eta):
         # reshape eta to [batch, T, K]
@@ -429,9 +477,9 @@ class DiscreteTimeCompetingRisks(Family):
 class MultivariateGaussian(Family):
     """
     Multivariate Gaussian family for correlated multi-task outcomes.
-    
+
     Models: Y ~ N(μ, Σ)
-    
+
     Σ can be:
     - diagonal: Σ = diag(exp(log_var))
     - low_rank: Σ = diag(exp(log_diag)) + V @ V^T
@@ -441,10 +489,10 @@ class MultivariateGaussian(Family):
         super().__init__()
         self.n_tasks = n_tasks
         self.covariance_type = covariance_type
-        
+
         # Mean component: μ
         # Note: TabMixNN head produces μ directly
-        
+
         # Covariance component: Σ
         if covariance_type == 'diagonal':
             self.log_var = nn.Parameter(torch.zeros(n_tasks))
@@ -461,6 +509,10 @@ class MultivariateGaussian(Family):
         # We only predict the mean μ through the neural network.
         # Covariance parameters are global and learned as part of the family.
         return self.n_tasks
+
+    @property
+    def primary_param_name(self) -> str:
+        return "means"
 
     def forward_params(self, eta):
         # eta is [batch, n_tasks] -> mu
@@ -517,6 +569,10 @@ class MultiLabelBinomial(Family):
     def n_params(self):
         return self.n_labels
 
+    @property
+    def primary_param_name(self) -> str:
+        return "log_odds_label0"
+
     def forward_params(self, eta):
         return eta
 
@@ -536,11 +592,11 @@ class ContinuousSurvival(Family):
     """
     Continuous-time survival family.
     Currently supports Weibull parametric hazard.
-    
+
     Hazard: h(t; λ, k) = (k/λ) * (t/λ)^(k-1)
     S(t; λ, k) = exp(-(t/λ)^k)
     f(t; λ, k) = h(t) * S(t)
-    
+
     Log-likelihood (observed): log(h(t)) + log(S(t))
     Log-likelihood (censored): log(S(t))
     """
@@ -555,6 +611,10 @@ class ContinuousSurvival(Family):
         # We predict a per-sample log-hazard ratio (log_hr)
         # λ_i = λ_baseline * exp(-log_hr / k)  # This makes h(t) = h0(t) * exp(log_hr)
         return 1
+
+    @property
+    def primary_param_name(self) -> str:
+        return "log_hazard_ratio"
 
     def forward_params(self, eta):
         # eta is log_hr: [batch, 1]
@@ -623,6 +683,10 @@ class Multinomial(Family):
     @property
     def n_params(self):
         return self.n_classes
+
+    @property
+    def primary_param_name(self) -> str:
+        return "logit_class0"
 
     def forward_params(self, eta):
         # eta is [batch, n_classes] logits

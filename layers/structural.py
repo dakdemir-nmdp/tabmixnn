@@ -108,23 +108,40 @@ class StaticStructureModel(nn.Module):
     Static structural dependencies (classical SEM).
     Implements: B_s η where B_s is strictly lower-triangular.
     """
-    
+
     def __init__(
-        self, 
-        dim: int, 
+        self,
+        dim: int,
         sparse_penalty: float = 0.01,
-        init_structure: Optional[torch.Tensor] = None
+        init_structure: Optional[torch.Tensor] = None,
+        learnable: bool = True
     ):
+        """
+        Args:
+            dim: Dimension of the structure matrix
+            sparse_penalty: L1 penalty weight for sparsity
+            init_structure: Initial structure matrix (if provided)
+            learnable: If True, B is a learnable parameter. If False, B is fixed (buffer).
+                      Use False for lavaan-specified structures.
+        """
         super().__init__()
-        
+
         self.dim = dim
         self.sparse_penalty_weight = sparse_penalty
-        
+        self.learnable = learnable
+
+        # Initialize B
         if init_structure is not None:
-            self.B_raw = nn.Parameter(init_structure.clone())
+            B_init = init_structure.clone()
         else:
-            self.B_raw = nn.Parameter(torch.zeros(dim, dim))
-        
+            B_init = torch.zeros(dim, dim)
+
+        # Make parameter or buffer based on learnable flag
+        if learnable:
+            self.B_raw = nn.Parameter(B_init)
+        else:
+            self.register_buffer('B_raw', B_init)
+
         # Lower triangular mask (exclude diagonal)
         mask = torch.tril(torch.ones(dim, dim), diagonal=-1)
         self.register_buffer('tril_mask', mask)

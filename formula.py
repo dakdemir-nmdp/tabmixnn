@@ -4,6 +4,7 @@ import numpy as np
 import pickle
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
+from patsy import dmatrix, build_design_matrices, PatsyError
 from .families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks
 
 @dataclass
@@ -46,6 +47,9 @@ class CompiledDesign:
         self.categorical_levels = {} # col -> list of levels
         self.categorical_dummy_levels = {} # col -> levels actually encoded
         self.intercept_included = True
+        self.design_info = None
+        self.fixed_feature_names: List[str] = []
+        self.fixed_formula = ""
         
         # Random effects state
         self.random_terms = [] # List[RandomEffectTerm]
@@ -115,7 +119,7 @@ class CompiledDesign:
             intercept = False
         # A standalone "1" indicates an intercept and should not be treated as a column
         fixed_terms = [t for t in fixed_terms if t != '1']
-        # We rely on bias for intercept; do not include explicit intercept column
+        # Legacy default: handle intercept via bias, not explicit column
         self.intercept_included = False
             
         # Parse random terms
@@ -152,71 +156,133 @@ class CompiledDesign:
             })
             
         return {'terms': fixed_terms, 'intercept': intercept}, random_terms_spec
+    def _build_fixed_formula(self, fixed_part):
+        terms = fixed_part['terms']
+        if not terms:
+            rhs = "1" if self.intercept_included else "-1"
+        else:
+            rhs = " + ".join(terms)
+            if not self.intercept_included:
+                rhs = rhs + " -1"
+        return rhs
+
+    def _prepare_fixed_frame(self, df: pd.DataFrame, fit: bool = False):
+        """Clean and type-cast fixed effect columns for patsy."""
+        df_clean = df.copy()
+        for col in df_clean.columns:
+            if pd.api.types.is_numeric_dtype(df_clean[col]):
+                if fit or col not in self.numeric_transformer_params:
+                    mu = df_clean[col].mean()
+                    sigma = df_clean[col].std() if df_clean[col].std() != 0 else 1.0
+                    self.numeric_transformer_params[col] = (mu, sigma)
+                mu, _ = self.numeric_transformer_params.get(col, (0.0, 1.0))
+                df_clean[col] = df_clean[col].fillna(mu)
+            else:
+                # Treat as categorical with explicit UNKNOWN level
+                if fit or col not in self.categorical_levels:
+                    levels = sorted(df_clean[col].dropna().astype(str).unique().tolist())
+                    if "__UNKNOWN__" not in levels:
+                        levels.append("__UNKNOWN__")
+                    self.categorical_levels[col] = levels
+                levels = self.categorical_levels.get(col, [])
+                df_clean[col] = df_clean[col].astype(str).astype("category")
+                if levels:
+                    df_clean[col] = df_clean[col].cat.set_categories(levels)
+                df_clean[col] = df_clean[col].fillna("__UNKNOWN__")
+                mask_unknown = ~df_clean[col].isin(levels)
+                if mask_unknown.any():
+                    df_clean.loc[mask_unknown, col] = "__UNKNOWN__"
+        return df_clean
 
     def _fit_fixed(self, df, fixed_part):
-        # Use bias for intercept; do not include explicit intercept column
+        # Legacy behavior: rely on model bias, not explicit intercept column
         self.intercept_included = False
-        
-        # Identify types
-        self.fixed_cols = []
-        for col_name in fixed_part['terms']:
-            # Naively assume direct column names for now. 
-            # TODO: Handle interactions (:), functions (log(x)), etc if needed.
-            # Blueprint assumes numeric columns or categorical fixed effects.
-            if col_name not in df.columns:
-                raise ValueError(f"Column {col_name} not found in dataframe.")
-            
-            if pd.api.types.is_numeric_dtype(df[col_name]):
-                # Store stats (kept for compatibility), but we keep raw scale for interpretability
-                mu = df[col_name].mean()
-                sigma = df[col_name].std() if df[col_name].std() != 0 else 1.0
-                self.numeric_transformer_params[col_name] = (mu, sigma)
-                self.fixed_cols.append({'name': col_name, 'type': 'numeric'})
-            else:
-                # Categorical
-                # For Phase A, let's just do dummy encoding (one-hot) minus one level if intercept
-                # Or just simple one-hot. 
-                # Blueprint: "categorical fixed levels and contrast coding scheme"
-                levels = sorted(df[col_name].dropna().unique())
-                self.categorical_levels[col_name] = levels
-                # If intercept included, drop first level to avoid collinearity
-                dummy_levels = levels[1:] if self.intercept_included else levels
-                self.categorical_dummy_levels[col_name] = dummy_levels
-                self.fixed_cols.append({'name': col_name, 'type': 'categorical'})
+        rhs = self._build_fixed_formula(fixed_part)
+        self.fixed_formula = f"~ {rhs}"
+
+        df_fixed = self._prepare_fixed_frame(df, fit=True)
+        try:
+            design_mat = dmatrix(self.fixed_formula, df_fixed, return_type="dataframe")
+        except PatsyError as e:
+            raise ValueError(f"Failed to parse fixed-effects formula '{self.fixed_formula}': {e}") from e
+
+        self.design_info = design_mat.design_info
+        self.fixed_feature_names = list(self.design_info.column_names)
+        # Backward-compatible metadata placeholders
+        self.fixed_cols = [{'name': name, 'type': 'patsy'} for name in self.fixed_feature_names]
+        self.categorical_dummy_levels = {k: v for k, v in self.categorical_levels.items()}
 
     def _transform_fixed(self, df):
-        parts = []
-            
-        for spec in self.fixed_cols:
-            col = spec['name']
-            if spec['type'] == 'numeric':
-                mu, sigma = self.numeric_transformer_params[col]
-                vals = df[col].fillna(mu).values.reshape(-1, 1)
-                parts.append(vals)
-            else:
-                # Categorical
-                levels = self.categorical_levels[col]
-                dummy_levels = self.categorical_dummy_levels.get(col, levels)
-                # Map to indices
-                # pd.Categorical
-                cat = pd.Categorical(df[col], categories=levels)
-                # One hot
-                drop_first = self.intercept_included
-                dummies = pd.get_dummies(cat, drop_first=drop_first)
-                # Reindex to ensure stable column order and dropped base handling
-                dummies = dummies.reindex(columns=dummy_levels, fill_value=0)
-                # For ML, full rank isn't always strictly required given regularization, 
-                # but let's stick to simple one-hot for now.
-                # If intercept is included, we usually drop first.
-                # Let's simple OneHot all for now to avoid collinearity headaches in simple implementation
-                # or rely on regularization.
-                parts.append(dummies.values)
-                
-        if not parts:
-            # Empty fixed effects?
-            return np.zeros((len(df), 0))
-            
-        return np.hstack(parts).astype(np.float32)
+        if self.design_info is None:
+            return np.zeros((len(df), 0), dtype=np.float32)
+
+        df_fixed = self._prepare_fixed_frame(df, fit=False)
+        try:
+            mats = build_design_matrices([self.design_info], df_fixed, return_type="dataframe")
+            X = np.asarray(mats[0], dtype=np.float32)
+        except PatsyError as e:
+            raise ValueError(f"Failed to build fixed design matrix with formula '{self.fixed_formula}': {e}") from e
+        return X
+
+    def export_state(self) -> Dict[str, Any]:
+        """Export a picklable snapshot of the design (avoids patsy objects)."""
+        return {
+            "formula": self.formula,
+            "outcomes": self.outcomes,
+            "sam_location": self.sam_location,
+            "sam_dim": self.sam_dim,
+            "cov_struct_map": self.cov_struct_map,
+            "intercept_included": self.intercept_included,
+            "numeric_transformer_params": self.numeric_transformer_params,
+            "categorical_levels": self.categorical_levels,
+            "categorical_dummy_levels": self.categorical_dummy_levels,
+            "fixed_formula": self.fixed_formula,
+            "fixed_feature_names": self.fixed_feature_names,
+            "random_terms": self.random_terms,
+        }
+
+    def _rebuild_design_info(self):
+        """Rebuild patsy design_info from stored metadata without original data."""
+        if not self.fixed_formula:
+            return
+
+        data = {}
+        for col in self.numeric_transformer_params.keys():
+            data[col] = pd.Series([0.0])
+        for col, levels in self.categorical_levels.items():
+            levels_list = list(levels)
+            if not levels_list:
+                levels_list = ["__UNKNOWN__"]
+            cat = pd.Categorical([levels_list[0]], categories=levels_list)
+            data[col] = cat
+
+        if not data:
+            return
+
+        df_dummy = pd.DataFrame(data)
+        design_mat = dmatrix(self.fixed_formula, df_dummy, return_type="dataframe")
+        self.design_info = design_mat.design_info
+        self.fixed_feature_names = list(self.design_info.column_names)
+
+    @classmethod
+    def restore_from_state(cls, state: Dict[str, Any]):
+        design = cls(
+            formula=state.get("formula"),
+            outcomes=state.get("outcomes", []),
+            sam_location=state.get("sam_location"),
+            sam_dim=state.get("sam_dim"),
+            cov_struct_map=state.get("cov_struct_map"),
+        )
+        design.intercept_included = state.get("intercept_included", False)
+        design.numeric_transformer_params = state.get("numeric_transformer_params", {})
+        design.categorical_levels = state.get("categorical_levels", {})
+        design.categorical_dummy_levels = state.get("categorical_dummy_levels", {})
+        design.fixed_formula = state.get("fixed_formula", "")
+        design.fixed_feature_names = state.get("fixed_feature_names", [])
+        design.random_terms = state.get("random_terms", [])
+        design.is_fitted = True
+        design._rebuild_design_info()
+        return design
 
     def _fit_random(self, df, random_parts_spec):
         self.random_terms = []
