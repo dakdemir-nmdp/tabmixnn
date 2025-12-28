@@ -172,15 +172,30 @@ class StaticStructureModel(nn.Module):
             # Our system: eta @ (I-B)^T = xi
             # Transpose: (I-B) @ eta^T = xi^T
             # A = I-B (lower triangular), X = eta^T, RHS = xi^T
-            
-            eta_T = torch.linalg.solve_triangular(
-                I_minus_B,
-                xi.T,
-                upper=False
-            )
+            try:
+                eta_T = torch.linalg.solve_triangular(
+                    I_minus_B,
+                    xi.T,
+                    upper=False
+                )
+            except RuntimeError:
+                jitter = 1e-3
+                eta_T = torch.linalg.solve_triangular(
+                    I_minus_B + jitter * torch.eye(self.dim, device=xi.device),
+                    xi.T,
+                    upper=False
+                )
             return eta_T.T
         else:
-            return torch.linalg.solve_triangular(I_minus_B, xi, upper=False)
+            try:
+                return torch.linalg.solve_triangular(I_minus_B, xi, upper=False)
+            except RuntimeError:
+                jitter = 1e-3
+                return torch.linalg.solve_triangular(
+                    I_minus_B + jitter * torch.eye(self.dim, device=xi.device),
+                    xi,
+                    upper=False,
+                )
     
     def dag_penalty(self):
         B = self.B
@@ -471,6 +486,22 @@ class DynamicStructureModel(nn.Module):
         attn = F.softmax(scores, dim=-1)
         return attn.mean(dim=1) # [batch, seq, seq]
 
+    def operator_norm_upper_bound(self) -> torch.Tensor:
+        """
+        Cheap upper bound on ||B_d|| using linear projections.
+        Softmax rows sum to 1, so ||Attn|| <= 1; bound dominated by value/output projections.
+        """
+        weights = []
+        for lin in [getattr(self, "W_V", None), getattr(self, "W_O", None)]:
+            if lin is not None and hasattr(lin, "weight"):
+                weights.append(torch.linalg.matrix_norm(lin.weight, ord=2))
+        if not weights:
+            return torch.tensor(0.0, device=next(self.parameters()).device)
+        bound = weights[0]
+        for w in weights[1:]:
+            bound = bound * w
+        return bound
+
 
 class HybridStructuralModel(nn.Module):
     """
@@ -593,15 +624,27 @@ class HybridStructuralModel(nn.Module):
         return p
         
     def _contraction_penalty(self, margin=0.1):
-        static_norm = self.B_static.spectral_norm() if self.use_static else 0.0
-        dynamic_norm = 1.0 if self.use_dynamic else 0.0
-        
-        if self.interpolation_alpha is not None:
-             total_norm = self.interpolation_alpha * static_norm + (1 - self.interpolation_alpha) * dynamic_norm
+        # Use operator norm bounds to encourage ||B_static + B_dynamic|| < 1
+        device = None
+        static_norm = (
+            self.B_static.spectral_norm()
+            if self.use_static
+            else torch.tensor(0.0, device=device or next(self.parameters()).device)
+        )
+        device = static_norm.device if hasattr(static_norm, "device") else device
+
+        if self.use_dynamic:
+            dynamic_norm = self.B_dynamic.operator_norm_upper_bound()
+            device = dynamic_norm.device
         else:
-             total_norm = static_norm + dynamic_norm
-             
-        threshold = 1.0 - margin
+            dynamic_norm = torch.tensor(0.0, device=device or next(self.parameters()).device)
+
+        if self.interpolation_alpha is not None:
+            total_norm = self.interpolation_alpha * static_norm + (1 - self.interpolation_alpha) * dynamic_norm
+        else:
+            total_norm = static_norm + dynamic_norm
+
+        threshold = torch.tensor(1.0 - margin, device=total_norm.device)
         return F.relu(total_norm - threshold) ** 2
 
 

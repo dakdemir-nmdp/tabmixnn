@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from .logging_config import get_logger
 
 class Family(nn.Module):
     """Base class for outcome families. Now inherits from nn.Module to support learnable parameters."""
@@ -224,6 +225,8 @@ class DiscreteTimeSurvival(Family):
     def __init__(self, time_bins):
         super().__init__()
         self.time_bins = np.array(time_bins)
+        self._warned_invalid = False
+        self.logger = get_logger("families.discrete_survival")
 
     @property
     def n_params(self):
@@ -246,22 +249,30 @@ class DiscreteTimeSurvival(Family):
         # We assume y is tuple (time_idx, event_status) or tensor with both.
         # Let's assume y is [batch, 2] where col 0 is time_idx (0..T-1) and col 1 is event (0/1).
         
-        time_idx = y[:, 0].long()
-        event = y[:, 1].float()
-        
-        # Construct mask
-        # For each subject i, we care about t <= time_idx[i]
-        # h_{it} = sigmoid(theta_{it})
-        
-        # We need to compute log likelihood efficiently.
-        # L_i = sum_{t < T_i} log(1 - h_{it}) + d_i * log(h_{iT_i}) + (1-d_i) * log(1-h_{iT_i})?
-        # Blueprint: - sum_{t < t_i} log(1-h_{it}) - d_i log(h_{it_i}) - (1-d_i) log(1-h_{it_i}) (if censored, the last term is last survival prob)
-        # Actually blueprint eq 9.1:
-        # if event: sum_{t < t_i} log(1-h_{it}) + log(h_{it_i})
-        # if censored at t_i: sum_{t <= t_i} log(1-h_{it})
-        
-        # Let's vectorize.
+        if y.ndim != 2 or y.shape[1] < 2:
+            raise ValueError("DiscreteTimeSurvival targets must have shape [batch, 2] -> [time_idx, event].")
+        time_idx_raw = y[:, 0].long()
+        event = torch.nan_to_num(y[:, 1], nan=0.0).float()
+
         batch_size, T = theta.shape
+        # Clip out-of-range times and warn once
+        if (time_idx_raw < 0).any() or (time_idx_raw >= T).any():
+            if not self._warned_invalid:
+                self.logger.warning(
+                    f"time_idx outside [0, {T-1}] encountered; clipping to valid range. "
+                    "Check that time_bins cover the observed follow-up."
+                )
+                self._warned_invalid = True
+            time_idx = time_idx_raw.clamp(min=0, max=T - 1)
+        else:
+            time_idx = time_idx_raw
+
+        # Clamp event indicator to [0,1]
+        if (event < 0).any() or (event > 1).any():
+            if not self._warned_invalid:
+                self.logger.warning("Event indicators outside [0,1] detected; clipping.")
+                self._warned_invalid = True
+            event = torch.clamp(event, 0.0, 1.0)
         
         # Range [0, 1, ..., T-1]
         t_range = torch.arange(T, device=theta.device).unsqueeze(0) # [1, T]
@@ -312,6 +323,8 @@ class DiscreteTimeCompetingRisks(Family):
         super().__init__()
         self.time_bins = np.array(time_bins)
         self.num_causes = num_causes # K
+        self._warned_invalid = False
+        self.logger = get_logger("families.competing_risks")
 
     @property
     def n_params(self):
@@ -332,10 +345,34 @@ class DiscreteTimeCompetingRisks(Family):
         # theta: [batch, T, K] logits
         # y: [batch, 2], time_idx and cause (0=censored, 1..K=causes)
         
-        time_idx = y[:, 0].long()
-        cause = y[:, 1].long() # 0 = censored, >0 event type
+        if y.ndim != 2 or y.shape[1] < 2:
+            raise ValueError("DiscreteTimeCompetingRisks targets must have shape [batch, 2] -> [time_idx, cause].")
+
+        time_idx_raw = y[:, 0].long()
+        cause_raw = y[:, 1].long() # 0 = censored, >0 event type
         
         batch_size, T, K = theta.shape
+        if (time_idx_raw < 0).any() or (time_idx_raw >= T).any():
+            if not self._warned_invalid:
+                self.logger.warning(
+                    f"time_idx outside [0, {T-1}] encountered; clipping to valid range. "
+                    "Verify that time_bins span observed follow-up."
+                )
+                self._warned_invalid = True
+            time_idx = time_idx_raw.clamp(min=0, max=T - 1)
+        else:
+            time_idx = time_idx_raw
+
+        if (cause_raw < 0).any() or (cause_raw > K).any():
+            if not self._warned_invalid:
+                self.logger.warning(
+                    f"Cause labels outside [0, {K}] detected; clipping. "
+                    "Expected 0 for censoring and 1..K for causes."
+                )
+                self._warned_invalid = True
+            cause = cause_raw.clamp(min=0, max=K)
+        else:
+            cause = cause_raw
         
         # p_{itk} = exp(eta) / (1 + sum exp(eta))
         # p_{it0} = 1 / (1 + sum exp(eta))
@@ -605,6 +642,8 @@ class ContinuousSurvival(Family):
         # Global learned baseline parameters (Weibull baseline)
         self.log_shape = nn.Parameter(torch.tensor(init_log_shape)) # log k
         self.log_scale = nn.Parameter(torch.tensor(init_log_scale)) # log λ_baseline
+        self._warned_invalid = False
+        self.logger = get_logger("families.continuous_survival")
 
     @property
     def n_params(self):
@@ -623,8 +662,15 @@ class ContinuousSurvival(Family):
     def nll(self, theta, y, **kwargs):
         # theta is log_hr: [batch]
         # y is [batch, 2] -> [time, event]
-        t = y[:, 0]
-        d = y[:, 1]
+        if y.ndim != 2 or y.shape[1] < 2:
+            raise ValueError("ContinuousSurvival targets must have shape [batch, 2] -> [time, event].")
+        t_raw = torch.nan_to_num(y[:, 0], nan=0.0)
+        d_raw = torch.nan_to_num(y[:, 1], nan=0.0)
+        if ((t_raw <= 0) | (d_raw < 0) | (d_raw > 1)).any() and not self._warned_invalid:
+            self.logger.warning("Survival targets contain non-positive times or event labels outside [0,1]; clamping.")
+            self._warned_invalid = True
+        t = torch.clamp(t_raw, min=1e-8)
+        d = torch.clamp(d_raw, 0.0, 1.0)
         
         k = torch.exp(self.log_shape)
         # log_hr shifts the hazard: h(t) = h0(t) * exp(theta)
@@ -694,7 +740,8 @@ class Multinomial(Family):
 
     def nll(self, theta, y, **kwargs):
         # theta is logits, y is labels [batch]
-        return F.cross_entropy(theta, y.long())
+        # Ensure y is 1D [batch] (remove potential column dim from dataframe extraction)
+        return F.cross_entropy(theta, y.long().flatten())
 
     def predict(self, theta, mode="default", **kwargs):
         # theta is logits

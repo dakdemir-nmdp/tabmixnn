@@ -156,41 +156,92 @@ class UnstructuredSlopeCovariance(CovarianceStructure):
 class KroneckerCovariance(CovarianceStructure):
     """
     Separable covariance: Cov = K_group ⊗ K_slope.
-    K_group is provided; K_slope is learnable (unstructured PSD).
+    Handles Train/Test splitting via GBLUP extrapolation on the group dimension.
     """
-    def __init__(self, n_levels, n_slopes, K_group, K_slope=None, jitter=1e-4):
+    def __init__(self, n_levels, n_slopes, K_group, full_levels, train_levels, K_slope=None, jitter=1e-4):
         super().__init__(n_levels, n_slopes)
         if isinstance(K_group, np.ndarray):
             K_group = torch.tensor(K_group, dtype=torch.float32)
-        self.register_buffer("K_group", K_group)
+        self.register_buffer("K_full", K_group)
         self.jitter = jitter
+
+        # Levels handling
+        self.full_levels = list(full_levels)
+        self.train_levels = list(train_levels)
+        self.level_to_idx = {lev: i for i, lev in enumerate(self.full_levels)}
+        train_idx = torch.tensor([self.level_to_idx[l] for l in self.train_levels], dtype=torch.long)
+        
+        # Subsets
+        self.register_buffer("K_train", K_group.index_select(0, train_idx).index_select(1, train_idx))
+        self.register_buffer("K_cross", K_group.index_select(1, train_idx)) # All rows, train cols
 
         if K_slope is None:
             self.raw_lower_slope = nn.Parameter(torch.zeros(n_slopes, n_slopes))
         else:
             if isinstance(K_slope, np.ndarray):
                 K_slope = torch.tensor(K_slope, dtype=torch.float32)
-            # Store as parameter to allow fine-tuning
             self.raw_lower_slope = nn.Parameter(torch.linalg.cholesky(K_slope + jitter * torch.eye(K_slope.shape[0])))
 
-    def forward(self, v):
-        # v: [levels, slopes, emb]
-        # Compute L_slope
+    def forward(self, v, indices=None):
+        # v: [n_train, slopes, emb] - variational params for training set
+        if v.shape[0] == self.K_train.shape[0] + 1:
+            # Assume index 0 is invalid/unknown params and valid levels start at 1
+            v = v[1:]
+            
+        # L_slope
         tril = torch.tril(self.raw_lower_slope)
         diag = torch.diag(F.softplus(torch.diag(self.raw_lower_slope)) + self.jitter)
         L_slope = tril - torch.diag(torch.diag(tril)) + diag  # [slopes, slopes]
 
-        # Cholesky of K_group
-        eye = torch.eye(self.K_group.shape[0], device=self.K_group.device)
-        L_group = torch.linalg.cholesky(self.K_group + self.jitter * eye)  # [levels, levels]
+        # L_group (Train)
+        eye = torch.eye(self.K_train.shape[0], device=self.K_train.device)
+        try:
+            L_group = torch.linalg.cholesky(self.K_train + self.jitter * eye)
+        except RuntimeError:
+            L_group = torch.linalg.cholesky(self.K_train + 10 * self.jitter * eye)
 
-        levels, slopes, emb = v.shape
-        out = torch.zeros_like(v)
+        # Generate u_train = L_slope @ v @ L_group.T
+        # Shapes: v [N_train, Slopes, Emb]
+        # We process each Emb channel
+        n_train, n_slopes, emb = v.shape
+        u_train = torch.zeros_like(v)
+        
         for e in range(emb):
-            V = v[:, :, e].t()  # [slopes, levels]
-            Y = L_slope @ V @ L_group.t()  # [slopes, levels]
-            out[:, :, e] = Y.t()
-        return out
+            V_e = v[:, :, e].t() # [Slopes, N_train]
+            # Y = L_slope @ V @ L_group.T
+            # L_group.T is [N_train, N_train] (Upper?)
+            # torch.linalg.cholesky returns Lower L. L @ L.T = K.
+            # We want u ~ N(0, K). u = L @ v_white.
+            # Here K_total = K_train \otimes (L_slope L_slope.T).
+            # u = (L_group \otimes L_slope) vec(V).
+            # Matrix form: U = L_slope @ V @ L_group.T.
+            Y = L_slope @ V_e @ L_group.t() # [Slopes, N_train]
+            u_train[:, :, e] = Y.t()
+
+        # Extrapolate to u_all via Henderson BLUP: u_all = K_cross @ K_train^-1 @ u_train
+        # Solve K_train @ alpha = u_train
+        # We can reuse L_group: K_train = L L.T
+        # alpha = K^-1 u = L.T^-1 L^-1 u
+        # rhs: u_train [N_train, Slopes, Emb] - reshape to 2D
+        u_train_flat = u_train.reshape(n_train, -1) # [N, S*E]
+        # alpha = solve(K_train, u_train)
+        # Using cholesky solve is faster
+        alpha_flat = torch.cholesky_solve(u_train_flat, L_group)
+        
+        # u_all = K_cross @ alpha
+        # K_cross [N_full, N_train]
+        u_all_flat = self.K_cross @ alpha_flat # [N_full, S*E]
+        u_all = u_all_flat.reshape(-1, n_slopes, emb)
+
+        if indices is None:
+            return u_all
+
+        # Gather
+        idx_adj = torch.clamp(indices, min=0)
+        unknown_row = u_all.mean(dim=0, keepdim=True)
+        u_all_padded = torch.cat([unknown_row, u_all], dim=0)
+        gathered = u_all_padded[idx_adj]
+        return gathered
 
 
 class GPCovariance(CovarianceStructure):
@@ -254,7 +305,10 @@ class GPCovariance(CovarianceStructure):
 
             A = K_train + self.lambda_k * torch.eye(K_train.shape[0], device=K_train.device)
             rhs = (v_train[:, s, :] * sigma[s])  # [n_train, emb]
-            alpha = torch.linalg.solve(A, rhs)  # [n_train, emb]
+            try:
+                alpha = torch.linalg.solve(A, rhs)  # [n_train, emb]
+            except RuntimeError:
+                alpha = torch.linalg.solve(A + 10 * self.lambda_k * torch.eye(K_train.shape[0], device=K_train.device), rhs)
 
             u_pred = K_cross @ alpha  # [n_levels, emb]
             u_all[:, s, :] = u_pred
@@ -354,8 +408,32 @@ class KCovariance(CovarianceStructure):
 
         self.register_buffer("K_train", K_train)
         self.register_buffer("K_cross", K_cross)
+        # Cache for KL computations against N(0, K_train)
+        self.register_buffer("K_logdet", torch.tensor(0.0))
+        self.register_buffer("K_inv", torch.empty(0))
+        self.register_buffer("K_inv_diag", torch.empty(0))
+        self._compute_k_cache()
 
         self.log_sigma = nn.Parameter(torch.zeros(n_slopes, 1))
+
+    def _compute_k_cache(self):
+        """Precompute logdet(K) and K^{-1} needed for KL against the K prior."""
+        n_train = self.K_train.shape[0]
+        if n_train == 0:
+            self.K_logdet = torch.tensor(0.0, device=self.K_train.device)
+            self.K_inv = torch.empty(0, device=self.K_train.device)
+            self.K_inv_diag = torch.empty(0, device=self.K_train.device)
+            return
+        eye = torch.eye(n_train, device=self.K_train.device)
+        K_reg = self.K_train + self.lambda_k * eye
+        try:
+            L = torch.linalg.cholesky(K_reg)
+        except RuntimeError:
+            L = torch.linalg.cholesky(K_reg + 10 * self.lambda_k * eye)
+        self.K_logdet = 2.0 * torch.log(torch.diag(L)).sum()
+        K_inv = torch.cholesky_inverse(L)
+        self.K_inv = K_inv
+        self.K_inv_diag = torch.diag(K_inv)
 
     def forward(self, v_train, indices=None):
         """
@@ -369,9 +447,18 @@ class KCovariance(CovarianceStructure):
 
         # Solve (K_train + lambda I) alpha = u_train for each slope/emb jointly
         n_train = self.K_train.shape[0]
-        A = self.K_train + self.lambda_k * torch.eye(n_train, device=self.K_train.device)
+        eye = torch.eye(n_train, device=self.K_train.device)
+        
+        # Use minimal jitter for interpolation to respect the latent values exactly
+        # The latent values u_train are already regularized by the KL term
+        jitter = 1e-6
+        A = self.K_train + jitter * eye
         rhs = u_train.reshape(n_train, -1)  # [n_train, n_slopes*emb]
-        alpha = torch.linalg.solve(A, rhs)  # [n_train, n_slopes*emb]
+        try:
+            alpha = torch.linalg.solve(A, rhs)  # [n_train, n_slopes*emb]
+        except RuntimeError:
+            # Increase jitter if K_train is nearly singular
+            alpha = torch.linalg.solve(A + 10 * self.lambda_k * eye, rhs)
         alpha = alpha.reshape(n_train, self.n_slopes, u_train.shape[2])
 
         # Predict all levels (including train) via K_cross @ alpha

@@ -41,6 +41,7 @@ class MixedEffectsRepresentation(nn.Module):
         scale_random_by_terms=False,
         unknown_strategy="learned",
         use_fixed_bias=True,
+        enforce_centering=True,
     ):
         """
         Args:
@@ -51,6 +52,7 @@ class MixedEffectsRepresentation(nn.Module):
             kl_normalize: Normalize KL divergence by number of elements
             scale_random_by_terms: Scale random effects by number of terms
             unknown_strategy: Strategy for unseen groups - "learned" or "zero"
+            enforce_centering: If True, enforce zero-mean constraint on random effects (orthogonal to intercept)
         """
         super().__init__()
         # Fixed part
@@ -58,6 +60,7 @@ class MixedEffectsRepresentation(nn.Module):
         self.kl_normalize = kl_normalize
         self.scale_random_by_terms = scale_random_by_terms
         self.unknown_strategy = unknown_strategy
+        self.enforce_centering = enforce_centering
         
         self.random_terms = nn.ModuleDict()
         self.variational_params = nn.ParameterDict() # For mu, log_scale
@@ -125,19 +128,27 @@ class MixedEffectsRepresentation(nn.Module):
                 self.cov_modules[tid] = UnstructuredSlopeCovariance(n_levels, n_slopes)
 
             elif ctype == "KRON":
+                train_levels = cargs.get("train_levels", train_levels)
+                n_train_levels = len(train_levels) if train_levels else n_levels
+                
                 self.variational_params[tid] = nn.ParameterList([
-                    nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
-                    nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
+                    nn.Parameter(torch.zeros(n_train_levels, n_slopes, embedding_dim)), # mu
+                    nn.Parameter(torch.ones(n_train_levels, n_slopes, embedding_dim) * -2.0) # log_s
                 ])
-                K_group = cargs.get("K_group") or cargs.get("matrix_tensor")
+                K_group = cargs.get("K_group")
+                if K_group is None:
+                    K_group = cargs.get("matrix_tensor")
                 K_slope = cargs.get("K_slope", None)
                 jitter = cargs.get("lambda_k", 1e-4)
                 if K_group is None:
                     raise ValueError(f"KRON covariance for group {group_name} requires 'K_group'.")
+                all_levels = cargs.get("levels", train_levels)
                 self.cov_modules[tid] = KroneckerCovariance(
                     n_levels=n_levels,
                     n_slopes=n_slopes,
                     K_group=K_group,
+                    full_levels=all_levels,
+                    train_levels=train_levels,
                     K_slope=K_slope,
                     jitter=jitter
                 )
@@ -232,12 +243,68 @@ class MixedEffectsRepresentation(nn.Module):
                 
                 mu, log_s = self.variational_params[tid]
                 
-                # KL divergence: q(v) vs N(0, I)
-                s = torch.exp(log_s)
-                var = s**2
-                kl = 0.5 * (var + mu**2 - 1 - 2*log_s).sum()
-                kl_sum = kl_sum + kl
-                kl_elems += (mu.numel() + log_s.numel())
+                # KL divergence: q(v) vs prior
+                cov_module = self.cov_modules[tid]
+                
+                # Enforce centering (orthogonality to intercept)
+                if self.enforce_centering and isinstance(cov_module, (IIDCovariance, UnstructuredSlopeCovariance)):
+                     # mu: [n_levels, n_slopes, emb]
+                     mu_mean = mu.mean(dim=0, keepdim=True)
+                     mu = mu - mu_mean
+                
+                if isinstance(cov_module, KCovariance):
+                    # KL between q = N(mu, diag(s^2)) and p = N(0, sigma^2 * K)
+                    n_train = mu.shape[0]
+                    s = torch.exp(log_s)  # [n_train, n_slopes, emb]
+                    k_inv = cov_module.K_inv
+                    diag_k_inv = cov_module.K_inv_diag
+                    logdet_p_base = cov_module.K_logdet
+                    
+                    # Get learned sigma from covariance module
+                    # sigma is [n_slopes, 1] usually
+                    if hasattr(cov_module, 'log_sigma'):
+                        sigma_sq = torch.exp(cov_module.log_sigma * 2.0).view(1, -1, 1) # [1, n_slopes, 1]
+                        log_sigma_sq = cov_module.log_sigma * 2.0 # [n_slopes, 1]
+                    else:
+                        sigma_sq = torch.ones(1, n_slopes, 1, device=mu.device)
+                        log_sigma_sq = torch.zeros(n_slopes, 1, device=mu.device)
+
+                    # Ensure cache on the correct device (in case model was moved)
+                    if k_inv.device != mu.device:
+                        k_inv = k_inv.to(mu.device)
+                        diag_k_inv = diag_k_inv.to(mu.device)
+                        logdet_p_base = logdet_p_base.to(mu.device)
+
+                    kl_term = 0.0
+                    # Iterate slopes and embeddings
+                    for sl in range(mu.shape[1]):
+                        sig2 = sigma_sq[0, sl, 0]
+                        nb_log_sig2 = n_train * log_sigma_sq[sl, 0]
+                        # logdet_p = logdet(sig2 * K) = N * log(sig2) + logdet(K)
+                        logdet_p = logdet_p_base + nb_log_sig2
+                        
+                        for e in range(mu.shape[2]):
+                            mu_vec = mu[:, sl, e]  # [n_train]
+                            s_vec = s[:, sl, e]    # stds
+                            logdet_q = 2.0 * torch.log(torch.clamp(s_vec, min=1e-8)).sum()
+                            
+                            # trace(Sigma_p^{-1} Sigma_q) -> trace(K^{-1}/sig2 * s^2)
+                            trace_term = (diag_k_inv * (s_vec ** 2)).sum() / sig2
+                            
+                            # mu^T Sigma_p^{-1} mu -> mu^T K^{-1} mu / sig2
+                            quad_term = (mu_vec @ (k_inv @ mu_vec)) / sig2
+                            
+                            kl_term = kl_term + 0.5 * (trace_term + quad_term - n_train + logdet_p - logdet_q)
+                    kl_sum = kl_sum + kl_term
+                    kl_elems += (mu.numel() + log_s.numel())
+
+                else:
+                    # IID/other priors: q(v) vs N(0, I)
+                    s = torch.exp(log_s)
+                    var = s**2
+                    kl = 0.5 * (var + mu**2 - 1 - 2*log_s).sum()
+                    kl_sum = kl_sum + kl
+                    kl_elems += (mu.numel() + log_s.numel())
                 
                 if self.training:
                     noise = torch.randn_like(mu)
@@ -247,8 +314,7 @@ class MixedEffectsRepresentation(nn.Module):
                     v_input = mu
                 
                 # Apply Covariance Structure L
-                cov_module = self.cov_modules[tid]
-                if isinstance(cov_module, (KCovariance, GPCovariance)):
+                if isinstance(cov_module, (KCovariance, KroneckerCovariance, GPCovariance)):
                     u_expected = cov_module(v_input, indices)  # already [batch, slopes, emb]
                     if self.unknown_strategy == "learned":
                         unknown_row = self.unknown_params[tid]
@@ -290,6 +356,15 @@ class MixedEffectsRepresentation(nn.Module):
             vals = {}
             if hasattr(mod, 'log_sigma'):
                 sigmas = torch.exp(mod.log_sigma).detach().cpu().numpy().flatten()
+                vals['sigmas'] = sigmas
+            elif hasattr(mod, 'raw_lower_slope'):
+                # KroneckerCovariance
+                tril = torch.tril(mod.raw_lower_slope)
+                jitter = getattr(mod, 'jitter', 1e-4)
+                diag = torch.diag(torch.nn.functional.softplus(torch.diag(mod.raw_lower_slope)) + jitter)
+                L = tril - torch.diag(torch.diag(tril)) + diag
+                Sigma = L @ L.t()
+                sigmas = torch.sqrt(torch.diag(Sigma)).detach().cpu().numpy()
                 vals['sigmas'] = sigmas
             
             if hasattr(mod, 'raw_rho'): # AR1
@@ -364,6 +439,7 @@ class MixedEffectsEncoder(nn.Module):
         cov_struct_map: Optional[Dict[str, Any]] = None,
         add_sam: bool = False,
         fixed_input_dim: Optional[int] = None,
+        kl_normalize: bool = True,
     ):
         super().__init__()
         self.design = compiled_design
@@ -376,7 +452,7 @@ class MixedEffectsEncoder(nn.Module):
             embedding_dim=embedding_dim,
             random_terms_config=random_config,
             cov_struct_map=cov_struct_map,
-            kl_normalize=True,  # Hardcoded optimal default
+            kl_normalize=kl_normalize,
             scale_random_by_terms=False,  # Hardcoded optimal default
             use_fixed_bias=not compiled_design.intercept_included,
         )

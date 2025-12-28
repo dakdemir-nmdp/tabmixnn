@@ -15,10 +15,13 @@ class OutcomeSpec:
     time: Optional[str] = None
     event: Optional[str] = None
     cause: Optional[str] = None
+    loss_weight: float = 1.0
     
     def get_target_cols(self):
         if self.y: return [self.y]
-        if self.cause: return [self.time, self.event, self.cause]
+        # Competing risks: time + cause only (no event column)
+        if self.cause: return [self.time, self.cause]
+        # Standard survival: time + event
         if self.time and self.event: return [self.time, self.event]
         return []
 
@@ -293,7 +296,9 @@ class CompiledDesign:
             # Map groups
             # If K-structure provided with explicit levels, honor that full ordering.
             maybe_cov = self.cov_struct_map.get(group, {})
-            use_k_levels = maybe_cov.get("type") == "K" and "levels" in maybe_cov
+            use_k_levels = False
+            if isinstance(maybe_cov, dict):
+                use_k_levels = maybe_cov.get("type") == "K" and "levels" in maybe_cov
 
             if use_k_levels:
                 levels_list = list(maybe_cov["levels"])

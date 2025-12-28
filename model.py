@@ -20,10 +20,10 @@ from .logging_config import get_logger
 class TabMixDataset(Dataset):
     """Streaming-friendly container for fixed/random design components."""
     def __init__(self, X, Z_ind, Z_slopes, Ys):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.Z_ind = [torch.tensor(z, dtype=torch.long) for z in Z_ind]
-        self.Z_slopes = [torch.tensor(z, dtype=torch.float32) for z in Z_slopes]
-        self.Ys = {k: torch.tensor(v, dtype=torch.float32) for k, v in Ys.items()}
+        self.X = X.clone().detach() if isinstance(X, torch.Tensor) else torch.tensor(X, dtype=torch.float32)
+        self.Z_ind = [z.clone().detach() if isinstance(z, torch.Tensor) else torch.tensor(z, dtype=torch.long) for z in Z_ind]
+        self.Z_slopes = [z.clone().detach() if isinstance(z, torch.Tensor) else torch.tensor(z, dtype=torch.float32) for z in Z_slopes]
+        self.Ys = {k: (v.clone().detach() if isinstance(v, torch.Tensor) else torch.tensor(v, dtype=torch.float32)) for k, v in Ys.items()}
 
     def __len__(self):
         return self.X.shape[0]
@@ -200,8 +200,11 @@ class TabMixNN(nn.Module):
         lambda_dag: float = 0.0,
         lambda_contraction: float = 0.0,
         grad_clip_norm: float = 1.0,
+        loss_reduction: str = "outcome_mean",  # 'outcome_mean' (legacy) or 'sample_weighted'
         device: str = "cpu",
         verbose: bool = False,
+        enforce_centering: bool = True, # Enforce zero-mean random effects (Default True for LMM exactness)
+        kl_normalize: bool = True,
         **kwargs
     ):
         super().__init__()
@@ -266,8 +269,13 @@ class TabMixNN(nn.Module):
         self.lambda_dag = lambda_dag
         self.lambda_contraction = lambda_contraction
         self.grad_clip_norm = grad_clip_norm
+        if loss_reduction not in ("outcome_mean", "sample_weighted"):
+            raise ValueError("loss_reduction must be 'outcome_mean' or 'sample_weighted'")
+        self.loss_reduction = loss_reduction
         self.device = device
         self.verbose = verbose
+        self.enforce_centering = enforce_centering
+        self.kl_normalize_encoder = kl_normalize
 
         # For pure linear mixed models (no hidden layers), default to identity head
         if not hidden_dims:
@@ -567,10 +575,11 @@ class TabMixNN(nn.Module):
              embedding_dim=self.embedding_dim,
              random_terms_config=random_config,
              cov_struct_map=self.cov_struct_map,
-             kl_normalize=True,
+             kl_normalize=self.kl_normalize_encoder,
              scale_random_by_terms=self.scale_random_by_terms,
              unknown_strategy=self.unknown_strategy,
-             use_fixed_bias=not getattr(compiled_design, "intercept_included", False)
+             use_fixed_bias=not getattr(compiled_design, "intercept_included", False),
+             enforce_centering=self.enforce_centering
         )
         
         encoder_output_dim = self.embedding_dim
@@ -866,23 +875,32 @@ class TabMixNN(nn.Module):
                 kl = self.current_kl
 
                 loss = torch.tensor(0.0, device=bx.device)
-                count = 0
+                total_weight = torch.tensor(0.0, device=bx.device)
                 for name, target in bys.items():
                     family = self.data_family(name)
-                    if target.ndim > 1:
-                        mask = ~torch.isnan(target).any(dim=1)
-                    else:
-                        mask = ~torch.isnan(target)
-                    if mask.sum() == 0:
+                    mask = ~torch.isnan(target).any(dim=1) if target.ndim > 1 else ~torch.isnan(target)
+                    n_obs = mask.sum()
+                    if n_obs == 0:
                         continue
                     pred = outputs_dict[name][mask]
                     tgt = target[mask]
                     theta = family.forward_params(pred)
-                    loss = loss + family.nll(theta, tgt)
-                    count += 1
+                    outcome_spec = self._outcome_spec(name)
+                    weight = torch.tensor(
+                        getattr(outcome_spec, "loss_weight", 1.0) if outcome_spec else 1.0,
+                        device=bx.device,
+                        dtype=torch.float32,
+                    )
+                    nll_val = family.nll(theta, tgt)
+                    if self.loss_reduction == "sample_weighted":
+                        loss = loss + nll_val * n_obs * weight
+                        total_weight = total_weight + n_obs * weight
+                    else:
+                        loss = loss + nll_val * weight
+                        total_weight = total_weight + weight
 
-                if count > 0:
-                    loss = loss / count
+                if total_weight.item() > 0:
+                    loss = loss / total_weight
 
                 if kl is not None:
                     loss = loss + self.lambda_kl * kl * (len(bx) / max(n_samples, 1))
@@ -936,22 +954,31 @@ class TabMixNN(nn.Module):
                 outputs_dict = self._ensure_dict_outputs(outputs)
 
                 loss = torch.tensor(0.0, device=bx.device)
-                count = 0
+                total_weight = torch.tensor(0.0, device=bx.device)
                 for name, target in Ys.items():
                     family = self.data_family(name)
-                    if target.ndim > 1:
-                        mask = ~torch.isnan(target).any(dim=1)
-                    else:
-                        mask = ~torch.isnan(target)
-                    if mask.sum() == 0:
+                    mask = ~torch.isnan(target).any(dim=1) if target.ndim > 1 else ~torch.isnan(target)
+                    n_obs = mask.sum()
+                    if n_obs == 0:
                         continue
                     pred = outputs_dict[name][mask]
                     tgt = target[mask]
                     theta = family.forward_params(pred)
-                    loss += family.nll(theta, tgt)
-                    count += 1
-                if count > 0:
-                    loss = loss / count
+                    outcome_spec = self._outcome_spec(name)
+                    weight = torch.tensor(
+                        getattr(outcome_spec, "loss_weight", 1.0) if outcome_spec else 1.0,
+                        device=bx.device,
+                        dtype=torch.float32,
+                    )
+                    nll_val = family.nll(theta, tgt)
+                    if self.loss_reduction == "sample_weighted":
+                        loss = loss + nll_val * n_obs * weight
+                        total_weight = total_weight + n_obs * weight
+                    else:
+                        loss = loss + nll_val * weight
+                        total_weight = total_weight + weight
+                if total_weight.item() > 0:
+                    loss = loss / total_weight
                 total_loss += loss.item()
                 n_batches += 1
         return total_loss / max(n_batches, 1)
@@ -1004,6 +1031,12 @@ class TabMixNN(nn.Module):
         for i, o in enumerate(self.outcomes):
             if o.name == name: return i
         return -1
+
+    def _outcome_spec(self, name):
+        for o in self.outcomes:
+            if o.name == name:
+                return o
+        return None
 
     def _calculate_fit_statistics(self, df):
         """
