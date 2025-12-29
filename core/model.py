@@ -8,13 +8,13 @@ import pandas as pd
 from types import SimpleNamespace
 from typing import List, Dict, Union, Optional, Any
 from tqdm import tqdm
-from .formula import CompiledDesign, OutcomeSpec
+from ..parsing.formula import CompiledDesign, OutcomeSpec
 from .encoder import MixedEffectsRepresentation
-from .backbones.gsem import GSEMBackbone 
-from .backbones.manifold import ManifoldBackbone 
+from ..backbones.gsem import GSEMBackbone 
+from ..backbones.manifold import ManifoldBackbone 
 from .families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks, Binomial, Gaussian, Poisson, NegBinomial, ContinuousSurvival, Multinomial
-from .callbacks import CallbackList, History, EarlyStopping
-from .logging_config import get_logger
+from ..utils.callbacks import CallbackList, History, EarlyStopping
+from ..utils.logging_config import get_logger
 
 
 class TabMixDataset(Dataset):
@@ -85,10 +85,10 @@ class TabMixNN(nn.Module):
         
         if input_dim is not None:
             # Build model immediately if input_dim is provided for legacy test compatibility
-            from .formula import CompiledDesign, RandomEffectTerm
+            from ..parsing.formula import CompiledDesign, RandomEffectTerm
             # Prepare outcomes for design if single family used
             if not model.outcomes and model.single_outcome_family:
-                from .formula import OutcomeSpec
+                from ..parsing.formula import OutcomeSpec
                 model.outcomes = [OutcomeSpec(name="main", y="y", family=model.single_outcome_family)]
             
             design = CompiledDesign(f, model.outcomes, "none", None)
@@ -121,7 +121,7 @@ class TabMixNN(nn.Module):
                    **kwargs)
         
         if input_dim is not None:
-            from .formula import CompiledDesign, OutcomeSpec
+            from ..parsing.formula import CompiledDesign, OutcomeSpec
             if not model.outcomes and model.single_outcome_family:
                 model.outcomes = [OutcomeSpec(name="main", y="y", family=model.single_outcome_family)]
             design = CompiledDesign(f, model.outcomes, "none", None)
@@ -151,7 +151,7 @@ class TabMixNN(nn.Module):
                    **kwargs)
                    
         if input_dim is not None:
-            from .formula import CompiledDesign, OutcomeSpec
+            from ..parsing.formula import CompiledDesign, OutcomeSpec
             if not model.outcomes and model.single_outcome_family:
                 model.outcomes = [OutcomeSpec(name="main", y="y", family=model.single_outcome_family)]
             design = CompiledDesign(f, model.outcomes, "none", None)
@@ -655,13 +655,13 @@ class TabMixNN(nn.Module):
         # D. Output SEM (Three modes: none, lavaan, learned)
         self.output_sem = None
         if self.output_sem_mode != 'none' and len(self.outcomes) > 1:
-            from .layers.structural import StaticStructureModel
+            from ..layers.structural import StaticStructureModel
             sem_dim = len(self.outcomes)
 
             if self.output_sem_mode == 'lavaan':
                 # Parse lavaan equations and create fixed structure
                 # (validation already done in __init__)
-                from .lavaan_parser import LavanParser
+                from ..parsing.lavaan_parser import LavanParser
                 outcome_names = [o.name for o in self.outcomes]
                 spec = LavanParser.parse(self.output_structure)
                 init_B = LavanParser.to_adjacency(spec, outcome_names)
@@ -686,7 +686,7 @@ class TabMixNN(nn.Module):
 
         # Backward compatibility: old API with output_structure_config only
         elif self.output_structure_config and len(self.outcomes) > 1:
-            from .layers.structural import StaticStructureModel
+            from ..layers.structural import StaticStructureModel
             sem_dim = len(self.outcomes)
             self.output_sem = StaticStructureModel(sem_dim, **self.output_structure_config)
             self.output_sem_mode = 'learned'  # Infer mode for backward compatibility
@@ -1290,7 +1290,7 @@ class TabMixNN(nn.Module):
         design_state = checkpoint.get('design_state')
         model.design = None
         if design_state:
-            from .formula import CompiledDesign
+            from ..parsing.formula import CompiledDesign
             model.design = CompiledDesign.restore_from_state(design_state)
         elif checkpoint.get('design'):
             # Backward compatibility for old checkpoints
@@ -1364,7 +1364,7 @@ class TabMixNN(nn.Module):
 
     def extract_parameters(self, data=None, sample_size: int = 256, linearize: bool = True):
         """Return interpretable parameter estimates (fixed, random, variance components, structure)."""
-        from .summary import parameter_estimates
+        from ..utils.summary import parameter_estimates
         return parameter_estimates(self, data=data, sample_size=sample_size, linearize=linearize)
 
     def extract_sam(self, layer_idx=0):
@@ -1894,11 +1894,11 @@ class GMSEMEstimator:
         if self.model.encoder is None:
             # Prepare mock outcomes if missing
             if not self.model.outcomes:
-                 from .formula import OutcomeSpec
+                 from ..parsing.formula import OutcomeSpec
                  self.model.outcomes = [OutcomeSpec(name="main", y="y", family=self.model.single_outcome_family or Gaussian())]
             
             # Build minimal design to satisfy model build
-            from .formula import CompiledDesign, OutcomeSpec
+            from ..parsing.formula import CompiledDesign, OutcomeSpec
             design = CompiledDesign(self.model.formula, self.model.outcomes, "none", None)
             self.model._build_model(fixed_input_dim=X.shape[1], compiled_design=design)
             self.model.design = design

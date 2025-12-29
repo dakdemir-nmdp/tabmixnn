@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 from types import SimpleNamespace
 
-from .formula import CompiledDesign
-from .layers.sem import SEMLayer
-from .covariance import (
+from ..parsing.formula import CompiledDesign
+from ..layers.sem import SEMLayer
+from ..covariance import (
     IIDCovariance,
     AR1Covariance,
     ARMACovariance,

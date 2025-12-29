@@ -601,7 +601,7 @@ class HybridStructuralModel(nn.Module):
         if not converged:
             self._convergence_failures += 1
             if self._convergence_failures <= 5 or self._convergence_failures % 100 == 0:
-                from ..logging_config import get_logger
+                from ..utils.logging_config import get_logger
                 logger = get_logger("layers.structural")
                 logger.warning(
                     f"Fixed-point iteration failed to converge in {self.max_iter} iterations "

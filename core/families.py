@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from .logging_config import get_logger
+from ..utils.logging_config import get_logger
 
 class Family(nn.Module):
     """Base class for outcome families. Now inherits from nn.Module to support learnable parameters."""
@@ -90,7 +90,7 @@ class Gaussian(Family):
         y = y.squeeze()
 
         # Use global learned sigma (clamped for numerical stability)
-        from .constants import MIN_LOG_SIGMA, MAX_LOG_SIGMA, EPSILON
+        from ..utils.constants import MIN_LOG_SIGMA, MAX_LOG_SIGMA, EPSILON
         log_sigma = torch.clamp(self.log_sigma, min=MIN_LOG_SIGMA, max=MAX_LOG_SIGMA)
         sigma = torch.exp(log_sigma) + EPSILON
 
@@ -157,7 +157,7 @@ class Poisson(Family):
 class NegBinomial(Family):
     def __init__(self):
         super().__init__()
-        from .logging_config import get_logger
+        from ..utils.logging_config import get_logger
         self.logger = get_logger("families")
 
     @property
@@ -181,7 +181,7 @@ class NegBinomial(Family):
             log_mu = theta[:, 0]
             log_alpha = theta[:, 1]
         # Clamp to avoid overflow/underflow and keep gradients flowing.
-        from .constants import MIN_LOG_PARAM, MAX_LOG_PARAM, LARGE_PENALTY, EPSILON
+        from ..utils.constants import MIN_LOG_PARAM, MAX_LOG_PARAM, LARGE_PENALTY, EPSILON
         log_mu = torch.clamp(log_mu, min=MIN_LOG_PARAM, max=MAX_LOG_PARAM)
         log_alpha = torch.clamp(log_alpha, min=MIN_LOG_PARAM, max=MAX_LOG_PARAM)
 
@@ -285,7 +285,7 @@ class DiscreteTimeSurvival(Family):
         
         h = torch.sigmoid(theta)
         # numerical stability check
-        from .constants import HAZARD_CLIP_MIN, HAZARD_CLIP_MAX
+        from ..utils.constants import HAZARD_CLIP_MIN, HAZARD_CLIP_MAX
         h = torch.clamp(h, HAZARD_CLIP_MIN, HAZARD_CLIP_MAX)
         
         # Log terms
@@ -581,7 +581,7 @@ class MultivariateGaussian(Family):
             return -dist.log_prob(y).mean()
         except ValueError:
             # Fallback for numerical stability if cov becomes non-PSD
-            from .constants import EPSILON, LARGE_PENALTY
+            from ..utils.constants import EPSILON, LARGE_PENALTY
             jitter = EPSILON * torch.eye(self.n_tasks, device=cov.device)
             try:
                 dist = torch.distributions.MultivariateNormal(mu, covariance_matrix=cov + jitter)

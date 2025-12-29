@@ -5,7 +5,7 @@ import pickle
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from patsy import dmatrix, build_design_matrices, PatsyError
-from .families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks
+from ..core.families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks
 
 @dataclass
 class OutcomeSpec:

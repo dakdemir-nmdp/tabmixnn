@@ -12,8 +12,8 @@ import torch.nn.functional as F
 from typing import Dict, List, Optional, Union, Any
 from .base import TabMixNNBackbone
 from ..layers.block import MixedInputLayer, GSEMHiddenLayer
-from ..families import Gaussian, Binomial, Multinomial, MultivariateGaussian, ContinuousSurvival
-from ..formula import OutcomeSpec
+from ..core.families import Gaussian, Binomial, Multinomial, MultivariateGaussian, ContinuousSurvival
+from ..parsing.formula import OutcomeSpec
 
 
 class GSEMBackbone(TabMixNNBackbone):

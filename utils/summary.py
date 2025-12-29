@@ -145,7 +145,7 @@ def _collect_random_effects(model) -> pd.DataFrame:
     if enc is None or not hasattr(enc, "variational_params"):
         return pd.DataFrame()
 
-    from .covariance.structures import KCovariance, KroneckerCovariance, GPCovariance
+    from tabmixnn.covariance.structures import KCovariance, KroneckerCovariance, GPCovariance
 
     records: List[Dict[str, Any]] = []
     for term_cfg in getattr(enc, "config", []):
