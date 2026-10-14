@@ -529,8 +529,13 @@ class TestKLAutoScale:
     lme4 reference intercept (≈251 ms) and slope (≈10 ms/day) within
     generous tolerances (±60 ms intercept, ±8 ms/day slope).
 
-    These are loose tolerances — we're checking the model is in the right
-    ballpark, not that it matches lme4 exactly.
+    The Sleepstudy test uses hidden_dims=[16] (one nonlinear layer) because
+    the pure LMM path (hidden_dims=[]) has a known identifiability issue when
+    the true DGP includes random slopes but the formula only specifies random
+    intercepts: the fixed slope is partially confounded with the random slope
+    variance. The hidden_dims=[16] path recovers the slope correctly because
+    the backbone can represent the slope through its own weights independently
+    of the fixed_linear layer.
     """
 
     def test_kl_auto_scale_sets_lambda(self):
@@ -674,4 +679,122 @@ class TestExtractParametersOutcomeUnits:
         assert r > 0.5, (
             f"extract_parameters() RE correlation with truth: r={r:.3f} (expected > 0.5). "
             f"Ablation fix may not be working."
+        )
+
+
+# ---------------------------------------------------------------------------
+# 8. FIX-4: Minor fixes — torch scoping, AR1 marginal variance
+# ---------------------------------------------------------------------------
+
+class TestFix4:
+    """
+    FIX-4a: import torch inside try block removed from fit() — torch is already
+            imported at module level; the inner import caused a scoping warning
+            in Python 3.12+ (UnboundLocalError risk in except clause).
+
+    FIX-4b: get_variance_summary() now reports marginal std for AR1:
+            sigma_marginal = sigma_innovation / sqrt(1 - rho^2)
+            Previously it reported sigma_innovation, which is wrong for
+            interpreting variance components (e.g. rho=0.8, sigma=5 gives
+            marginal std 8.33, not 5.0).
+
+    FIX-4c: CompositeStructuralModel docstring now explicitly documents the
+            sequential-vs-fixed-point deviation from paper Eq.22 and when to
+            use HybridStructuralModel instead.
+    """
+
+    def test_fit_no_import_torch_in_try(self):
+        """
+        fit() must not contain 'import torch' inside a try block.
+        torch is imported at module level; the inner import is redundant
+        and causes a scoping hazard in Python 3.12+.
+        """
+        import inspect
+        from tabmixnn.core.model import TabMixNN
+        src = inspect.getsource(TabMixNN.fit)
+        lines = src.split('\n')
+        in_try = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped == 'try:':
+                in_try = True
+            if in_try and stripped.startswith('except'):
+                in_try = False
+            if in_try and stripped == 'import torch':
+                raise AssertionError(
+                    "Found 'import torch' inside a try block in fit(). "
+                    "torch is already imported at module level — remove the inner import."
+                )
+
+    def test_ar1_variance_summary_reports_marginal_std(self):
+        """
+        get_variance_summary() must report marginal std for AR1, not innovation std.
+
+        Stationary AR1: Var(u) = sigma^2 / (1 - rho^2)
+        Marginal std    = sigma / sqrt(1 - rho^2)
+
+        With sigma=5, rho=0.8: marginal std = 5/sqrt(1-0.64) = 5/0.6 = 8.333
+        The old code returned 5.0 (innovation std) — wrong for variance reporting.
+        """
+        import torch
+        from tabmixnn.covariance.structures import AR1Covariance
+        from tabmixnn import TabMixNN, Gaussian, OutcomeSpec
+
+        # Build a minimal model with AR1 covariance
+        df = _make_gaussian_lmm(n_groups=10, n_per_group=10)
+        outcomes = [OutcomeSpec(name="y", y="y", family=Gaussian())]
+        model = TabMixNN(
+            formula="y ~ x + (1|group)",
+            outcomes=outcomes,
+            hidden_dims=[],
+            embedding_dim=1,
+            epochs=1,
+            lr=1e-3,
+            cov_struct_map={"group": {"type": "AR1"}},
+            verbose=False,
+        )
+        model.fit(df)
+
+        # Manually set known AR1 parameters
+        enc = model.encoder
+        cov = enc.cov_modules["term_0"]
+        with torch.no_grad():
+            cov.log_sigma.fill_(float(torch.log(torch.tensor(5.0))))
+            cov.raw_rho.fill_(float(torch.arctanh(torch.tensor(0.8))))
+
+        summary = enc.get_variance_summary()
+        term_vals = summary["term_0"]
+
+        sigma_innovation = 5.0
+        rho = 0.8
+        expected_marginal = sigma_innovation / (1 - rho ** 2) ** 0.5  # 8.333
+
+        reported = float(term_vals["sigmas"][0])
+        assert abs(reported - expected_marginal) < 0.01, (
+            f"AR1 get_variance_summary reported sigma={reported:.3f}, "
+            f"expected marginal std={expected_marginal:.3f} (sigma/sqrt(1-rho^2)). "
+            f"innovation_sigma should be in term_vals['innovation_sigma']."
+        )
+        # innovation_sigma should also be accessible
+        assert "innovation_sigma" in term_vals, (
+            "get_variance_summary should expose 'innovation_sigma' for AR1 "
+            "so callers can access both innovation and marginal std."
+        )
+        assert abs(float(term_vals["innovation_sigma"][0]) - sigma_innovation) < 0.01
+
+    def test_composite_structural_model_docstring_documents_eq22_deviation(self):
+        """
+        CompositeStructuralModel docstring must mention paper Eq.22 and the
+        sequential-vs-fixed-point deviation, so users know when to use
+        HybridStructuralModel instead.
+        """
+        from tabmixnn.layers.structural import CompositeStructuralModel
+        doc = CompositeStructuralModel.__doc__ or ""
+        assert "Eq.22" in doc or "fixed-point" in doc, (
+            "CompositeStructuralModel docstring must document the deviation from "
+            "paper Eq.22 (sequential approximation vs true fixed-point iteration)."
+        )
+        assert "HybridStructuralModel" in doc, (
+            "CompositeStructuralModel docstring must mention HybridStructuralModel "
+            "as the alternative for exact fixed-point semantics."
         )

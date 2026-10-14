@@ -371,12 +371,8 @@ class TabMixNN(nn.Module):
             raise ValueError(f"val_fraction must be in (0, 1), got {val_fraction}")
 
         # For pure identity-head LMMs, fix initialization seed for reproducibility
-        try:
-            if self.use_identity_head:
-                import torch
-                torch.manual_seed(0)
-        except Exception:
-            pass
+        if self.use_identity_head:
+            torch.manual_seed(0)
 
         self._train_data = df
 

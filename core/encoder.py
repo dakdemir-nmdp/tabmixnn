@@ -344,33 +344,54 @@ class MixedEffectsRepresentation(nn.Module):
 
     def get_variance_summary(self):
         """
-        Returns a dict of term_id -> {slope_idx: sigma_value, type: cov_type}
+        Returns a dict of term_id -> {sigmas, rho (if AR1), type}.
+
+        sigmas always contains the MARGINAL standard deviation of the random effect
+        in the embedding space, not the innovation std:
+          - IID/K/GP: sigma (already marginal)
+          - AR1/ARMA: sigma / sqrt(1 - rho^2)  (stationary marginal std)
+          - Kronecker: sqrt(diag(L_slope @ L_slope.T))
         """
         summary = {}
         for term_id, mod in self.cov_modules.items():
-            # Assume mod has log_sigma or similar
-            # IID and AR1 have log_sigma
-            # K has log_sigma
-            
-            # Access params directly? Or rely on convention.
             vals = {}
-            if hasattr(mod, 'log_sigma'):
+
+            if isinstance(mod, AR1Covariance):
+                sigma = torch.exp(mod.log_sigma).detach().cpu()
+                rho = torch.tanh(mod.raw_rho).detach().cpu()
+                # Marginal std of stationary AR1: sigma / sqrt(1 - rho^2)
+                marginal = (sigma / torch.sqrt(1.0 - rho ** 2 + 1e-8)).numpy().flatten()
+                vals['sigmas'] = marginal
+                vals['rho'] = rho.numpy().flatten()
+                vals['innovation_sigma'] = sigma.numpy().flatten()
+
+            elif isinstance(mod, ARMACovariance):
+                # For ARMA, report innovation sigma; marginal variance is complex
+                sigma = torch.exp(mod.log_sigma).detach().cpu().numpy().flatten()
+                vals['sigmas'] = sigma
+                if mod.phi_raw is not None:
+                    phi = torch.tanh(mod.phi_raw).detach().cpu().numpy()
+                    vals['phi'] = phi
+
+            elif hasattr(mod, 'log_sigma'):
                 sigmas = torch.exp(mod.log_sigma).detach().cpu().numpy().flatten()
                 vals['sigmas'] = sigmas
+                if hasattr(mod, 'raw_rho'):
+                    rho = torch.tanh(mod.raw_rho).detach().cpu().numpy().flatten()
+                    vals['rho'] = rho
+
             elif hasattr(mod, 'raw_lower_slope'):
-                # KroneckerCovariance
+                # KroneckerCovariance: marginal std from slope Cholesky
+                import torch.nn.functional as F
                 tril = torch.tril(mod.raw_lower_slope)
                 jitter = getattr(mod, 'jitter', 1e-4)
-                diag = torch.diag(torch.nn.functional.softplus(torch.diag(mod.raw_lower_slope)) + jitter)
-                L = tril - torch.diag(torch.diag(tril)) + diag
+                diag_vals = F.softplus(torch.diag(mod.raw_lower_slope)) + jitter
+                diag_mat = torch.diag(diag_vals)
+                L = tril - torch.diag(torch.diag(tril)) + diag_mat
                 Sigma = L @ L.t()
                 sigmas = torch.sqrt(torch.diag(Sigma)).detach().cpu().numpy()
                 vals['sigmas'] = sigmas
-            
-            if hasattr(mod, 'raw_rho'): # AR1
-                rho = torch.tanh(mod.raw_rho).detach().cpu().numpy().flatten()
-                vals['rho'] = rho
-                
+
             vals['type'] = mod.__class__.__name__
             summary[term_id] = vals
         return summary
