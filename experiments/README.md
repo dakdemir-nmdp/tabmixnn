@@ -5,7 +5,12 @@ Reproduces Tables 2-4 from arXiv:2512.23787 using 5-fold cross-validation.
 ## Setup
 
 ```bash
-pip install xgboost  # only additional dependency
+# Create uv venv (avoids macOS system Python MPS segfault)
+uv venv .venv --python 3.11
+source .venv/bin/activate
+uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install numpy pandas patsy scikit-learn tqdm xgboost requests
+pip install -e . --no-deps
 ```
 
 ## Datasets

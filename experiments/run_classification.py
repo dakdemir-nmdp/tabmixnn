@@ -12,6 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import torch
+torch.backends.mps.is_available = lambda: False  # prevent MPS LayerNorm dispatch on Apple Silicon
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, roc_auc_score
@@ -29,6 +32,7 @@ RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
 N_SPLITS = 5
+EPOCHS = 200
 SEED = 42
 
 
@@ -42,7 +46,7 @@ def cv_tabmixnn(df, formula, group_col, outcome, n_splits=N_SPLITS):
             formula=formula,
             hidden_dims=[32],
             embedding_dim=8,
-            epochs=100,
+            epochs=EPOCHS,
             batch_size=64,
             learning_rate=0.005,
             kl_auto_scale=True,
@@ -67,7 +71,11 @@ def cv_xgboost(df, outcome, features, n_splits=N_SPLITS):
     """K-fold CV for XGBoost baseline; returns mean AUC and accuracy."""
     df = df.copy()
     for col in features:
-        if df[col].dtype == object or str(df[col].dtype) == "category":
+        try:
+            is_numeric = np.issubdtype(df[col].dtype, np.number)
+        except TypeError:
+            is_numeric = False
+        if not is_numeric:
             df[col] = LabelEncoder().fit_transform(df[col].astype(str))
     X, y = df[features].values, df[outcome].values
     kf = KFold(n_splits=n_splits, shuffle=True, random_state=SEED)

@@ -550,7 +550,7 @@ class TabMixNN(nn.Module):
                     pred = family.predict(theta, mode=mode)
                     if not torch.is_tensor(pred):
                         pred = torch.as_tensor(pred, device=self.device, dtype=torch.float32)
-                    buffers.setdefault(name, []).append(pred.detach().cpu())
+                    buffers.setdefault(name, []).append(pred.detach().cpu().reshape(-1))
 
         results = {}
         for name, parts in buffers.items():
