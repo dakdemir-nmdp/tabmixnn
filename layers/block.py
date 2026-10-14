@@ -308,6 +308,11 @@ class GSEMHiddenLayer(nn.Module):
             xi = xi + self.re_proj(re)
         
         # Normalization: Pre-structure (Separation of Scales)
+        # NOTE (m2): Pre-LN normalizes xi to unit scale before the structural solve,
+        # but the residual below adds unnormalized H_in. If H_in has large scale early
+        # in training, the structural transformation's contribution is swamped. The
+        # standard Pre-LN Transformer pattern would apply LN to H_in before the
+        # residual; this is a known suboptimality retained for backward compatibility.
         if self.layer_norm is not None and self.norm_position == 'pre_structure':
             xi = self.layer_norm(xi)
 

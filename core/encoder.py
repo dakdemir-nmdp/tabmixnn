@@ -37,7 +37,7 @@ class MixedEffectsRepresentation(nn.Module):
         embedding_dim,
         random_terms_config,
         cov_struct_map=None,
-        kl_normalize=True,
+        kl_normalize=False,
         scale_random_by_terms=False,
         unknown_strategy="learned",
         use_fixed_bias=True,
@@ -49,7 +49,11 @@ class MixedEffectsRepresentation(nn.Module):
             embedding_dim: Dimension of embedding space
             random_terms_config: List of random effect term configurations
             cov_struct_map: Dict mapping term_id to covariance structure
-            kl_normalize: Normalize KL divergence by number of elements
+            kl_normalize: Normalize KL by parameter count (default False). Setting
+                True divides the KL sum by the total number of variational parameters,
+                which destroys the ELBO's probabilistic interpretation and makes
+                kl_auto_scale meaningless. Use False; the training loop's (B/N)
+                mini-batch factor is the only normalization the ELBO requires.
             scale_random_by_terms: Scale random effects by number of terms
             unknown_strategy: Strategy for unseen groups - "learned" or "zero"
             enforce_centering: If True, enforce zero-mean constraint on random effects (orthogonal to intercept)
@@ -316,6 +320,14 @@ class MixedEffectsRepresentation(nn.Module):
                 # Apply Covariance Structure L
                 if isinstance(cov_module, (KCovariance, KroneckerCovariance, GPCovariance)):
                     u_expected = cov_module(v_input, indices)  # already [batch, slopes, emb]
+                    # Enforce centering for K/Kronecker/GP: subtract mean over the full
+                    # level array so random effects remain mean-zero (identifiability).
+                    # cov_module returns batch-gathered values; call without indices to
+                    # get the full [n_levels, slopes, emb] array for mean computation.
+                    if self.enforce_centering:
+                        u_all_full = cov_module(v_input, None)  # [n_levels, slopes, emb]
+                        u_mean = u_all_full.mean(dim=0, keepdim=True)  # [1, slopes, emb]
+                        u_expected = u_expected - u_mean
                     if self.unknown_strategy == "learned":
                         unknown_row = self.unknown_params[tid]
                     else:
@@ -460,7 +472,7 @@ class MixedEffectsEncoder(nn.Module):
         cov_struct_map: Optional[Dict[str, Any]] = None,
         add_sam: bool = False,
         fixed_input_dim: Optional[int] = None,
-        kl_normalize: bool = True,
+        kl_normalize: bool = False,
     ):
         super().__init__()
         self.design = compiled_design

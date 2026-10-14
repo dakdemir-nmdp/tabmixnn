@@ -403,6 +403,20 @@ class DynamicStructureModel(nn.Module):
                 eta = eta.unsqueeze(-1)
             return self._forward_feature_mixing(eta, return_weights)
 
+        # m4: warn when called with flat input and feature_mixing=False.
+        # With seq_len=1, self-attention is a trivial 1x1 matrix — no dynamic
+        # structure is learned. Set feature_mixing=True (the default in
+        # GSEMHiddenLayer) for meaningful attention over tabular features.
+        if eta.dim() == 2:
+            import warnings
+            warnings.warn(
+                "DynamicStructureModel received a flat [batch, dim] input with "
+                "feature_mixing=False. Self-attention with seq_len=1 is a no-op — "
+                "no dynamic structure will be learned. Pass feature_mixing=True to "
+                "treat the dim axis as the sequence (standard for tabular data).",
+                UserWarning,
+                stacklevel=2,
+            )
         return self._forward_impl(eta, return_weights)
 
     def _forward_feature_mixing(self, x, return_weights):
@@ -517,6 +531,8 @@ class HybridStructuralModel(nn.Module):
         static_config: Dict = None,
         dynamic_config: Dict = None,
         interpolation_alpha: Optional[float] = None,
+        max_iter: int = 10,
+        tol: float = 1e-5,
     ):
         super().__init__()
         
@@ -534,9 +550,9 @@ class HybridStructuralModel(nn.Module):
         if use_dynamic:
             self.B_dynamic = DynamicStructureModel(dim, **dynamic_config)
             
-        self.max_iter = 10
-        self.tol = 1e-5
-        self._convergence_failures = 0  # Track convergence failures for diagnostics
+        self.max_iter = max_iter  # m1: configurable
+        self.tol = tol            # m1: configurable
+        self._convergence_failures = 0
 
     def forward(self, xi, return_attention=False):
         """
@@ -544,7 +560,9 @@ class HybridStructuralModel(nn.Module):
 
         CONVERGENCE GUARANTEE:
             For convergence, the spectral norm ||B_static + B_dynamic|| < 1 is required.
-            The contraction penalty encourages this during training, but does not enforce it.
+            The contraction penalty encourages this during training, but does not enforce it
+            (lambda_contraction defaults to 0.0 in TabMixNN — set it > 0 when using this
+            model to protect gradient flow through the structural solve).
             If convergence fails (max_iter reached), a warning is logged.
 
         Consider using CompositeStructuralModel for guaranteed stability without iteration.
@@ -739,6 +757,41 @@ class CompositeStructuralModel(nn.Module):
             p['dag'] = self.B_static.dag_penalty()
             p['sparsity'] = self.B_static.sparsity_penalty()
         return p
+
+    def approximation_error(self, xi: torch.Tensor, hybrid_max_iter: int = 50) -> float:
+        """
+        M3 diagnostic: measure how far the composite (sequential) approximation
+        deviates from the true fixed-point (HybridStructuralModel with many iterations).
+
+        Returns the relative error ||h_composite - h_hybrid|| / (||h_hybrid|| + 1e-8)
+        averaged over the batch. Values < 0.01 indicate the approximation is negligible.
+
+        Args:
+            xi: Input tensor [batch, dim]
+            hybrid_max_iter: Iterations for the reference fixed-point solve (default 50).
+        """
+        self.eval()
+        with torch.no_grad():
+            h_composite = self.forward(xi)
+
+            # Reference: run fixed-point iteration to convergence
+            eta = xi.clone()
+            for _ in range(hybrid_max_iter):
+                eta_old = eta.clone()
+                term = 0.0
+                if self.use_static:
+                    term = term + self.B_static(eta)
+                if self.use_dynamic:
+                    dyn, _ = self.B_dynamic(eta, return_weights=True)
+                    term = term + dyn
+                eta = xi + term
+                if torch.norm(eta - eta_old) < 1e-6 * (torch.norm(eta) + 1e-8):
+                    break
+            h_hybrid = eta
+
+            rel_err = (torch.norm(h_composite - h_hybrid, dim=-1) /
+                       (torch.norm(h_hybrid, dim=-1) + 1e-8))
+            return float(rel_err.mean().item())
 
 
 class RandomEffectsModule(nn.Module):

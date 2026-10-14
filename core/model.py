@@ -205,7 +205,7 @@ class TabMixNN(nn.Module):
         device: str = "cpu",
         verbose: bool = False,
         enforce_centering: bool = True, # Enforce zero-mean random effects (Default True for LMM exactness)
-        kl_normalize: bool = True,
+        kl_normalize: bool = False,
         **kwargs
     ):
         super().__init__()
@@ -413,7 +413,12 @@ class TabMixNN(nn.Module):
         # 3. Transform Data
         X, Z_ind, Z_slopes, Ys = self.design.transform(train_df, mode='fit')
         
-        # 3b. Auto-scale λ_KL = 1 / mean_group_size (paper recommendation)
+        # 3b. Auto-scale λ_KL = 1 / mean_group_size
+        # This is an empirical β-VAE-style heuristic that damps the KL relative to
+        # the NLL. It is NOT derived from the ELBO: the ELBO-correct weight is
+        # λ_KL = 1 with the (B/N) mini-batch factor in the training loop handling
+        # the scaling. The 1/n̄_g value was found empirically to work well across
+        # mixed-effects benchmarks and is documented as a heuristic, not a theorem.
         if self.kl_auto_scale and Z_ind:
             group_sizes = []
             for z in Z_ind:
@@ -703,7 +708,26 @@ class TabMixNN(nn.Module):
             self.output_sem = StaticStructureModel(sem_dim, **self.output_structure_config)
             self.output_sem_mode = 'learned'  # Infer mode for backward compatibility
         
-        self.optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        # Separate parameter groups: variational RE params and covariance params must
+        # NOT receive L2 weight decay — that would add a second conflicting prior on
+        # top of the KL term and bias random effects toward zero beyond what the ELBO
+        # intends. Only backbone / fixed-effect parameters get weight_decay.
+        re_param_ids = set()
+        if self.encoder is not None:
+            for p in self.encoder.variational_params.parameters():
+                re_param_ids.add(id(p))
+            for p in self.encoder.cov_modules.parameters():
+                re_param_ids.add(id(p))
+            if hasattr(self.encoder, 'unknown_params'):
+                for p in self.encoder.unknown_params.parameters():
+                    re_param_ids.add(id(p))
+        re_params = [p for p in self.parameters() if id(p) in re_param_ids]
+        other_params = [p for p in self.parameters() if id(p) not in re_param_ids]
+        self.optimizer = optim.Adam(
+            [{'params': other_params, 'weight_decay': self.weight_decay},
+             {'params': re_params,    'weight_decay': 0.0}],
+            lr=self.lr,
+        )
 
     def _ensure_dict_outputs(self, outputs):
         """Normalize forward outputs to a dict keyed by outcome name."""
@@ -1190,6 +1214,12 @@ class TabMixNN(nn.Module):
                         if y_true is not None:
                             y_true_t = torch.tensor(y_true, dtype=torch.float32)
                             delta = y_true_t.mean() - pred.mean()
+                            if abs(delta.item()) > 1.0:
+                                self.logger.warning(
+                                    f"_update_random_embeddings: intercept bias correction |delta|={abs(delta.item()):.2f} > 1.0. "
+                                    "This suggests the model failed to learn the intercept during training. "
+                                    "Consider increasing epochs or lr."
+                                )
                             # Clamp to avoid exploding bias shifts
                             delta_clamped = torch.clamp(delta, -100.0, 100.0)
                             bias_param.data = bias_param.data + delta_clamped
