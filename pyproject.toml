@@ -18,6 +18,14 @@ dependencies = [
     "requests",
 ]
 
+[project.optional-dependencies]
+examples = [
+    "matplotlib",
+    "scipy",
+    "xgboost",
+]
+lifelines = ["lifelines"]
+
 [tool.setuptools.packages]
 find = {where = [".."], include = ["tabmixnn*"]}
 

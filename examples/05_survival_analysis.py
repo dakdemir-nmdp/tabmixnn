@@ -41,12 +41,24 @@ print("="*70)
 def load_rossi_data():
     """Load Rossi recidivism dataset from Rdatasets."""
     try:
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
         url = "https://vincentarelbundock.github.io/Rdatasets/csv/carData/Rossi.csv"
-        df = pd.read_csv(url, index_col=0)
+        df = pd.read_csv(url, storage_options={"ssl_context": ctx})
         return df
-    except Exception as e:
-        print(f"Error loading data: {e}")
-        return None
+    except Exception:
+        # Fallback: use requests with verify=False
+        try:
+            import requests, io
+            url = "https://vincentarelbundock.github.io/Rdatasets/csv/carData/Rossi.csv"
+            resp = requests.get(url, verify=False, timeout=30)
+            resp.raise_for_status()
+            return pd.read_csv(io.StringIO(resp.text))
+        except Exception as e:
+            print(f"Error loading data: {e}")
+            return None
 
 df = load_rossi_data()
 if df is None:
@@ -184,6 +196,11 @@ def concordance_index(event_times, event_indicators, risk_scores):
 # Convert survival to risk scores
 if survival_probs is not None:
     survival_probs = np.asarray(survival_probs)
+    n_test = len(test_df)
+    # Reshape flat array [n*T] → [n, T] if needed
+    if survival_probs.ndim == 1 and survival_probs.shape[0] > n_test:
+        n_bins = survival_probs.shape[0] // n_test
+        survival_probs = survival_probs.reshape(n_test, n_bins)
     if survival_probs.ndim == 1:
         risk_scores = 1.0 - survival_probs
     else:

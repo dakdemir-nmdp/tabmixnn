@@ -18,6 +18,12 @@
 ```bash
 pip install torch  # Install PyTorch first
 pip install tabmixnn
+
+# For running examples (matplotlib, scipy, xgboost):
+pip install -e ".[examples]"
+
+# Optional: lifelines for survival analysis utilities
+pip install -e ".[lifelines]"
 ```
 
 Or install from source:

@@ -53,7 +53,7 @@ def cv_tabmixnn(df, formula, group_col, n_splits=N_SPLITS):
             embedding_dim=8,
             epochs=EPOCHS,
             batch_size=32,
-            learning_rate=0.005,
+            lr=0.005,
             kl_auto_scale=True,
             verbose=False,
         )
@@ -86,6 +86,44 @@ def cv_xgboost(df, outcome, features, n_splits=N_SPLITS):
         rmses.append(rmse(y[test_idx], pred))
         r2s.append(r2_score(y[test_idx], pred))
     return float(np.mean(rmses)), float(np.mean(r2s))
+
+
+def cv_tabmixnn_group_holdout(df, formula, group_col, holdout_frac=0.25):
+    """Hold out 25% of groups entirely for test; train on remaining groups.
+
+    This is the correct evaluation for a mixed-effects model: the model must
+    generalise to *unseen* groups, not just unseen observations within seen groups.
+    The standard K-fold CV (cv_tabmixnn) leaks group identity into training and
+    therefore over-estimates performance for new groups.
+
+    Returns: (rmse, r2) on the held-out groups.
+    """
+    rng = np.random.default_rng(SEED)
+    groups = df[group_col].unique()
+    n_holdout = max(1, int(len(groups) * holdout_frac))
+    holdout_groups = rng.choice(groups, size=n_holdout, replace=False)
+    train_mask = ~df[group_col].isin(holdout_groups)
+    train = df[train_mask].copy()
+    test = df[~train_mask].copy()
+
+    if len(train) == 0 or len(test) == 0:
+        return float("nan"), float("nan")
+
+    model = TabMixNNRegressor(
+        formula=formula,
+        hidden_dims=[32],
+        embedding_dim=8,
+        epochs=EPOCHS,
+        batch_size=32,
+        lr=0.005,
+        kl_auto_scale=True,
+        verbose=False,
+    )
+    model.fit(train)
+    pred = model.predict(test)
+    outcome = formula.split("~")[0].strip()
+    y = test[outcome].values
+    return rmse(y, pred), float(r2_score(y, pred))
 
 
 DATASETS = [
@@ -140,21 +178,28 @@ def main():
         df = load(cfg["loader"])
         print(f"  n={len(df)}, columns={list(df.columns)}")
 
-        print(f"  TabMixNN ({N_SPLITS}-fold CV)...")
+        print(f"  TabMixNN ({N_SPLITS}-fold obs CV)...")
         tab_rmse, tab_r2 = cv_tabmixnn(df, cfg["formula"], cfg["group"])
         print(f"    RMSE={tab_rmse:.4f}  R²={tab_r2:.4f}")
 
-        print(f"  XGBoost ({N_SPLITS}-fold CV)...")
+        print(f"  TabMixNN (group-holdout CV, 25% groups held out)...")
+        tab_gh_rmse, tab_gh_r2 = cv_tabmixnn_group_holdout(df, cfg["formula"], cfg["group"])
+        print(f"    RMSE={tab_gh_rmse:.4f}  R²={tab_gh_r2:.4f}")
+
+        print(f"  XGBoost ({N_SPLITS}-fold obs CV)...")
         xgb_rmse, xgb_r2 = cv_xgboost(df, cfg["outcome"], cfg["xgb_features"])
         print(f"    RMSE={xgb_rmse:.4f}  R²={xgb_r2:.4f}")
 
         rows.append({
             "dataset": cfg["name"],
-            "tabmixnn_rmse": round(tab_rmse, 4),
-            "tabmixnn_r2":   round(tab_r2, 4),
-            "xgboost_rmse":  round(xgb_rmse, 4),
-            "xgboost_r2":    round(xgb_r2, 4),
-            "tabmixnn_wins_rmse": tab_rmse < xgb_rmse,
+            "tabmixnn_obs_rmse":    round(tab_rmse, 4),
+            "tabmixnn_obs_r2":      round(tab_r2, 4),
+            "tabmixnn_gh_rmse":     round(tab_gh_rmse, 4) if not np.isnan(tab_gh_rmse) else None,
+            "tabmixnn_gh_r2":       round(tab_gh_r2, 4) if not np.isnan(tab_gh_r2) else None,
+            "xgboost_rmse":         round(xgb_rmse, 4),
+            "xgboost_r2":           round(xgb_r2, 4),
+            "tabmixnn_wins_obs_rmse": tab_rmse < xgb_rmse,
+            "tabmixnn_wins_gh_rmse":  (tab_gh_rmse < xgb_rmse) if not np.isnan(tab_gh_rmse) else None,
         })
 
     results = pd.DataFrame(rows)
@@ -164,8 +209,12 @@ def main():
     print(f"\n{'='*50}")
     print("REGRESSION SUMMARY")
     print(results.to_string(index=False))
-    wins = results["tabmixnn_wins_rmse"].sum()
-    print(f"\nTabMixNN wins (RMSE): {wins}/{len(results)} datasets")
+    wins_obs = results["tabmixnn_wins_obs_rmse"].sum()
+    wins_gh = results["tabmixnn_wins_gh_rmse"].sum()
+    print(f"\nTabMixNN wins (obs CV RMSE):        {wins_obs}/{len(results)} datasets")
+    print(f"TabMixNN wins (group-holdout RMSE): {wins_gh}/{len(results)} datasets")
+    print("\nHypothesis: TabMixNN should win more datasets under group-holdout CV")
+    print("because that is what random effects are designed for.")
     print(f"Results saved to: {out}")
     return results
 

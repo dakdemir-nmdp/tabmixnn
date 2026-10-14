@@ -798,3 +798,343 @@ class TestFix4:
             "CompositeStructuralModel docstring must mention HybridStructuralModel "
             "as the alternative for exact fixed-point semantics."
         )
+
+
+# ---------------------------------------------------------------------------
+# 9. Covariance structures
+# ---------------------------------------------------------------------------
+
+class TestCovarianceStructures:
+    """AR1, IID, UnstructuredSlope forward passes; enforce_centering."""
+
+    def _make_df(self, n_groups=15, n_per=20):
+        rng = np.random.default_rng(99)
+        groups = np.repeat(np.arange(n_groups), n_per).astype(str)
+        x = rng.standard_normal(n_groups * n_per)
+        u = rng.normal(0, 2.0, n_groups)[np.repeat(np.arange(n_groups), n_per)]
+        y = 3.0 + 1.5 * x + u + rng.normal(0, 0.5, n_groups * n_per)
+        return pd.DataFrame({"y": y, "x": x, "group": groups})
+
+    def test_ar1_forward_shape_and_marginal_variance(self):
+        """AR1 forward: output shape correct; u[0] has correct marginal variance."""
+        import torch
+        from tabmixnn.covariance.structures import AR1Covariance
+        n_levels, n_slopes, emb = 10, 1, 4
+        cov = AR1Covariance(n_levels, n_slopes)
+        with torch.no_grad():
+            cov.log_sigma.fill_(float(torch.log(torch.tensor(2.0))))
+            cov.raw_rho.fill_(float(torch.arctanh(torch.tensor(0.6))))
+        v = torch.randn(n_levels, n_slopes, emb)
+        u = cov(v)
+        assert u.shape == (n_levels, n_slopes, emb), f"Expected {(n_levels, n_slopes, emb)}, got {u.shape}"
+        # Marginal variance of u[0] = sigma^2 / (1 - rho^2)
+        sigma = float(torch.exp(cov.log_sigma[0, 0]))
+        rho = float(torch.tanh(cov.raw_rho[0, 0]))
+        expected_var = sigma ** 2 / (1 - rho ** 2)
+        torch.manual_seed(0)
+        samples = []
+        for _ in range(500):
+            v_s = torch.randn(n_levels, n_slopes, emb)
+            u_s = cov(v_s)
+            samples.append(u_s[0, 0, 0].item())
+        empirical_var = float(np.var(samples))
+        assert abs(empirical_var - expected_var) / expected_var < 0.15, (
+            f"AR1 u[0] empirical var={empirical_var:.3f}, expected={expected_var:.3f}"
+        )
+
+    def test_iid_forward_scaled_by_sigma(self):
+        """IID forward: output is v * sigma (broadcast over levels)."""
+        import torch
+        from tabmixnn.covariance.structures import IIDCovariance
+        n_levels, n_slopes, emb = 8, 2, 4
+        cov = IIDCovariance(n_levels, n_slopes)
+        sigma_val = 3.0
+        with torch.no_grad():
+            cov.log_sigma.fill_(float(np.log(sigma_val)))
+        v = torch.ones(n_levels, n_slopes, emb)
+        u = cov(v)
+        assert u.shape == (n_levels, n_slopes, emb)
+        np.testing.assert_allclose(u.detach().numpy(), sigma_val, atol=1e-5)
+
+    def test_unstructured_slope_output_shape(self):
+        """UnstructuredSlope forward: output shape matches input."""
+        import torch
+        from tabmixnn.covariance.structures import UnstructuredSlopeCovariance
+        n_levels, n_slopes, emb = 10, 3, 8
+        cov = UnstructuredSlopeCovariance(n_levels, n_slopes)
+        v = torch.randn(n_levels, n_slopes, emb)
+        u = cov(v)
+        assert u.shape == (n_levels, n_slopes, emb), f"Shape mismatch: {u.shape}"
+
+    def test_enforce_centering_iid(self):
+        """enforce_centering=True: mean of u across levels is near zero for IID."""
+        from tabmixnn import TabMixNN, Gaussian, OutcomeSpec
+        df = self._make_df()
+        outcomes = [OutcomeSpec(name="y", y="y", family=Gaussian())]
+        model = TabMixNN(
+            formula="y ~ x + (1|group)",
+            outcomes=outcomes,
+            hidden_dims=[16],
+            embedding_dim=4,
+            epochs=50,
+            lr=5e-3,
+            kl_auto_scale=True,
+            enforce_centering=True,
+            verbose=False,
+        )
+        model.fit(df)
+        enc = model.encoder
+        tid = "term_0"
+        assert tid in enc.variational_params, "term_0 not in variational_params"
+        mu = enc.variational_params[tid][0].detach().numpy()  # [n_levels+1, emb]
+        mu_valid = mu[1:]  # skip index 0 (unknown level)
+        mean_across_levels = np.abs(mu_valid.mean(axis=0))
+        std_across_levels = mu_valid.std(axis=0) + 1e-8
+        ratio = mean_across_levels / std_across_levels
+        assert ratio.mean() < 0.5, (
+            f"enforce_centering=True: mean/std ratio={ratio.mean():.3f} (expected < 0.5)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 10. Multi-task learning
+# ---------------------------------------------------------------------------
+
+class TestMultiTask:
+    """Fit a model with 2 outcomes (Gaussian + Binomial); check predictions and metrics."""
+
+    def _make_multitask_df(self, n=400, n_groups=10, seed=7):
+        rng = np.random.default_rng(seed)
+        groups = (np.arange(n) % n_groups).astype(str)
+        x = rng.standard_normal(n)
+        u = rng.normal(0, 1.5, n_groups)[np.arange(n) % n_groups]
+        y_cont = 3.0 + 2.0 * x + u + rng.normal(0, 0.5, n)
+        logit = 0.5 + 1.0 * x + 0.3 * u
+        y_bin = (rng.random(n) < 1 / (1 + np.exp(-logit))).astype(float)
+        return pd.DataFrame({"y_cont": y_cont, "y_bin": y_bin, "x": x, "group": groups})
+
+    def test_multitask_predictions_return_dict_with_both_keys(self):
+        from tabmixnn import TabMixNN, Gaussian, Binomial, OutcomeSpec
+        df = self._make_multitask_df()
+        outcomes = [
+            OutcomeSpec(name="cont", y="y_cont", family=Gaussian()),
+            OutcomeSpec(name="bin", y="y_bin", family=Binomial()),
+        ]
+        model = TabMixNN(
+            formula="~ x + (1|group)",
+            outcomes=outcomes,
+            hidden_dims=[32],
+            embedding_dim=8,
+            epochs=80,
+            lr=5e-3,
+            kl_auto_scale=True,
+            verbose=False,
+        )
+        model.fit(df)
+        preds = model.predict(df)
+        assert isinstance(preds, dict), "predict() should return dict for multi-outcome model"
+        assert "cont" in preds and "bin" in preds, f"Missing keys: {list(preds.keys())}"
+
+    def test_multitask_reasonable_metrics(self):
+        """Both outcomes achieve R²>0.3 and AUC>0.6 on training data."""
+        from tabmixnn import TabMixNN, Gaussian, Binomial, OutcomeSpec
+        from sklearn.metrics import roc_auc_score
+        df = self._make_multitask_df()
+        outcomes = [
+            OutcomeSpec(name="cont", y="y_cont", family=Gaussian()),
+            OutcomeSpec(name="bin", y="y_bin", family=Binomial()),
+        ]
+        model = TabMixNN(
+            formula="~ x + (1|group)",
+            outcomes=outcomes,
+            hidden_dims=[32],
+            embedding_dim=8,
+            epochs=150,
+            lr=5e-3,
+            kl_auto_scale=True,
+            verbose=False,
+        )
+        model.fit(df)
+        preds = model.predict(df)
+
+        y_cont = df["y_cont"].values
+        r2 = 1 - np.sum((y_cont - preds["cont"]) ** 2) / np.sum((y_cont - y_cont.mean()) ** 2)
+        assert r2 > 0.3, f"Gaussian outcome R²={r2:.3f} (expected > 0.3)"
+
+        auc = roc_auc_score(df["y_bin"].values, preds["bin"])
+        assert auc > 0.6, f"Binomial outcome AUC={auc:.3f} (expected > 0.6)"
+
+
+# ---------------------------------------------------------------------------
+# 11. Survival model fit — DiscreteTimeCompetingRisks CIF constraint
+# ---------------------------------------------------------------------------
+
+class TestSurvivalModelFit:
+    """CIF sums to ≤ 1 at each time point for DiscreteTimeCompetingRisks."""
+
+    def test_competing_risks_cif_sums_leq_one(self):
+        """Fit DiscreteTimeCompetingRisks; verify CIF sums ≤ 1 at each time point."""
+        import torch
+        from tabmixnn import TabMixNN, DiscreteTimeCompetingRisks, OutcomeSpec
+
+        rng = np.random.default_rng(55)
+        n, T, n_causes = 200, 8, 2
+        groups = (np.arange(n) % 10).astype(str)
+        x = rng.standard_normal(n)
+        cause = rng.choice([0, 1, 2], n, p=[0.4, 0.35, 0.25])
+        time_idx = rng.integers(0, T, n)
+        df = pd.DataFrame({"time": time_idx, "cause": cause, "x": x, "group": groups})
+
+        time_bins = list(range(T))
+        fam = DiscreteTimeCompetingRisks(time_bins=time_bins, num_causes=n_causes)
+        outcomes = [OutcomeSpec(name="cr", family=fam, time="time", cause="cause")]
+
+        model = TabMixNN(
+            formula="~ x + (1|group)",
+            outcomes=outcomes,
+            hidden_dims=[16],
+            embedding_dim=4,
+            epochs=30,
+            lr=5e-3,
+            verbose=False,
+        )
+        model.fit(df)
+
+        X_np, Z_ind, Z_slopes, _ = model.design.transform(df, mode="predict")
+        X_t = torch.tensor(X_np, dtype=torch.float32)
+        Z_it = [torch.tensor(z, dtype=torch.long) for z in Z_ind]
+        Z_st = [torch.tensor(z, dtype=torch.float32) for z in Z_slopes]
+        with torch.no_grad():
+            raw = model.forward(X_t, Z_it, Z_st)
+            theta = fam.forward_params(raw)
+            cif = fam.predict(theta, mode="cif")  # [n, T, n_causes]
+
+        cif_sum = cif.sum(axis=-1)  # [n, T]
+        assert (cif_sum <= 1.0 + 1e-5).all(), (
+            f"CIF sum exceeds 1 at some time points: max={cif_sum.max():.4f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 12. Save / Load
+# ---------------------------------------------------------------------------
+
+class TestSaveLoad:
+    """Fit, save, load, verify predictions are identical."""
+
+    def test_save_load_predictions_identical(self, tmp_path):
+        from tabmixnn import TabMixNN, Gaussian, OutcomeSpec
+        df = _make_gaussian_lmm(n_groups=10, n_per_group=10)
+        outcomes = [OutcomeSpec(name="y", y="y", family=Gaussian())]
+        model = TabMixNN(
+            formula="y ~ x + (1|group)",
+            outcomes=outcomes,
+            hidden_dims=[16],
+            embedding_dim=4,
+            epochs=30,
+            lr=5e-3,
+            verbose=False,
+        )
+        model.fit(df)
+        preds_before = model.predict(df)
+
+        path = str(tmp_path / "model.pt")
+        model.save(path)
+
+        loaded = TabMixNN.load(path)
+        preds_after = loaded.predict(df)
+
+        np.testing.assert_allclose(
+            preds_before, preds_after, atol=1e-5,
+            err_msg="Predictions differ after save/load"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 13. Optimizer parameter groups — C2 regression test
+# ---------------------------------------------------------------------------
+
+class TestOptimizerParameterGroups:
+    """After fit(), variational_params and cov_modules have weight_decay=0."""
+
+    def test_re_params_have_zero_weight_decay(self):
+        from tabmixnn import TabMixNN, Gaussian, OutcomeSpec
+        df = _make_gaussian_lmm(n_groups=10, n_per_group=10)
+        outcomes = [OutcomeSpec(name="y", y="y", family=Gaussian())]
+        model = TabMixNN(
+            formula="y ~ x + (1|group)",
+            outcomes=outcomes,
+            hidden_dims=[16],
+            embedding_dim=4,
+            epochs=1,
+            lr=1e-3,
+            weight_decay=1e-4,
+            verbose=False,
+        )
+        model.fit(df)
+
+        enc = model.encoder
+        re_param_ids = set()
+        for p in enc.variational_params.parameters():
+            re_param_ids.add(id(p))
+        for p in enc.cov_modules.parameters():
+            re_param_ids.add(id(p))
+
+        for group in model.optimizer.param_groups:
+            for p in group["params"]:
+                if id(p) in re_param_ids:
+                    assert group["weight_decay"] == 0.0, (
+                        f"RE/cov param has weight_decay={group['weight_decay']} (expected 0.0). "
+                        "C2 fix: variational_params and cov_modules must not receive L2 decay."
+                    )
+
+
+# ---------------------------------------------------------------------------
+# 14. Approximation error — M3 diagnostic
+# ---------------------------------------------------------------------------
+
+class TestApproximationError:
+    """CompositeStructuralModel.approximation_error() returns float in [0, 1]."""
+
+    def test_approximation_error_range(self):
+        import torch
+        from tabmixnn import TabMixNN, Gaussian, OutcomeSpec
+        from tabmixnn.layers.structural import CompositeStructuralModel
+
+        rng = np.random.default_rng(77)
+        n = 100
+        df = pd.DataFrame({
+            "y": rng.standard_normal(n),
+            "x": rng.standard_normal(n),
+            "group": (np.arange(n) % 10).astype(str),
+        })
+        outcomes = [OutcomeSpec(name="y", y="y", family=Gaussian())]
+
+        model = TabMixNN(
+            formula="y ~ x + (1|group)",
+            outcomes=outcomes,
+            hidden_dims=[32],
+            use_static_structure=True,
+            use_dynamic_structure=True,
+            epochs=1,
+            verbose=False,
+        )
+        model.fit(df)
+
+        composite = None
+        for layer in model.backbone.hidden_layers:
+            if hasattr(layer, "structure") and isinstance(
+                layer.structure, CompositeStructuralModel
+            ):
+                composite = layer.structure
+                break
+
+        assert composite is not None, (
+            "No CompositeStructuralModel found in backbone. "
+            "Ensure use_static_structure=True and use_dynamic_structure=True."
+        )
+
+        xi = torch.randn(16, 32)
+        err = composite.approximation_error(xi)
+        assert isinstance(err, float), f"approximation_error() should return float, got {type(err)}"
+        assert 0.0 <= err <= 1.0, f"approximation_error()={err:.4f} not in [0, 1]"

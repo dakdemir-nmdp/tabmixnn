@@ -66,9 +66,7 @@ Modeling these together:
 ```python
 import numpy as np
 import pandas as pd
-from tabmixnn import TabMixNN
-from tabmixnn.formula import OutcomeSpec
-from tabmixnn.families import Gaussian, Binomial
+from tabmixnn import TabMixNN, OutcomeSpec, Gaussian, Binomial
 
 # Simulate data
 np.random.seed(42)
@@ -129,7 +127,7 @@ TabMixNN supports mixing different outcome types in one model.
 ### Example: Comprehensive Patient Profile
 
 ```python
-from tabmixnn.families import Gaussian, Binomial, Poisson, DiscreteTimeSurvival
+from tabmixnn import Gaussian, Binomial, Poisson, DiscreteTimeSurvival
 
 np.random.seed(42)
 n = 500
@@ -185,7 +183,7 @@ outcomes = [
         name="recovery",
         time="recovery_time",
         event="recovery_event",
-        family=DiscreteTimeSurvival(max_time=5)
+        family=DiscreteTimeSurvival(time_bins=list(range(6)))  # 5 intervals: 0..5
     )
 ]
 
@@ -255,11 +253,11 @@ sem_structure = """
 """
 
 model = TabMixNN(
-    formula="~ age + treatment + (1|center)",
+    formula=formula,
     outcomes=outcomes,
     architecture="gsem",
-    sem_mode="lavaan",
-    sem_structure=sem_structure,
+    output_sem_mode="lavaan",
+    output_structure=sem_structure,
     hidden_dims=[64, 32],
     epochs=30,
     verbose=True
@@ -283,8 +281,7 @@ TabMixNN supports three SEM modes for output relationships:
 model = TabMixNN(
     formula=formula,
     outcomes=outcomes,
-    sem_mode="none",  # Default: independent outcomes
-    ...
+    output_sem_mode="none",  # Default: independent outcomes
 )
 ```
 
@@ -301,9 +298,8 @@ sem_structure = """
 model = TabMixNN(
     formula=formula,
     outcomes=outcomes,
-    sem_mode="lavaan",
-    sem_structure=sem_structure,
-    ...
+    output_sem_mode="lavaan",
+    output_structure=sem_structure,
 )
 ```
 
@@ -314,15 +310,14 @@ model = TabMixNN(
 model = TabMixNN(
     formula=formula,
     outcomes=outcomes,
-    sem_mode="learned",  # Learn structure from data
-    ...
+    output_sem_mode="learned",  # Learn structure from data
 )
 ```
 
 ### Complete Example: HCT Outcomes
 
 ```python
-from tabmixnn.families import ContinuousSurvival
+from tabmixnn import ContinuousSurvival
 
 np.random.seed(42)
 n = 400
@@ -369,8 +364,8 @@ model = TabMixNN(
     formula="~ age + hla_match + conditioning + (1|center_id)",
     outcomes=outcomes,
     architecture="gsem",
-    sem_mode="lavaan",
-    sem_structure=sem_structure,
+    output_sem_mode="lavaan",
+    output_structure=sem_structure,
     hidden_dims=[64, 32],
     epochs=30,
     verbose=True
@@ -448,7 +443,7 @@ Key concepts:
 
 - **Multi-task learning**: Model multiple outcomes simultaneously
 - **Heterogeneous outcomes**: Mix continuous, binary, count, survival
-- **SEM modes**:
+- **SEM modes** (use `output_sem_mode=` and `output_structure=`):
   - `none`: Independent outcomes
   - `lavaan`: Specify causal structure
   - `learned`: Learn structure from data
