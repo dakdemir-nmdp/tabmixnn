@@ -199,24 +199,7 @@ If you use TabMixNN in your research, please cite:
 
 ## License
 
-**Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**
-
-Copyright (c) 2025 Deniz Akdemir
-
-This work is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License.
-
-**You are free to:**
-- Share and redistribute the material
-- Adapt, remix, and build upon the material
-
-**Under the following terms:**
-- **Attribution**: Give appropriate credit and indicate if changes were made
-- **NonCommercial**: You may NOT use the material for commercial purposes
-
-**Commercial use requires explicit written permission.** For commercial licensing inquiries, contact: dakdemir@nmdp.org
-
-See the [LICENSE](LICENSE) file for full details or visit:
-https://creativecommons.org/licenses/by-nc/4.0/
+MIT License — Copyright (c) 2025 Deniz Akdemir. See the [LICENSE](LICENSE) file for full details.
 
 ## Contributing
 
