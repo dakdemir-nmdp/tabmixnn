@@ -14,7 +14,7 @@ Example Usage:
 For more information, see: https://github.com/dakdemir-nmdp/tabmixnn
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 __author__ = "Deniz Akdemir"
 __email__ = "deniz.akdemir.work@gmail.com"
 
