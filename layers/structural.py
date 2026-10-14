@@ -650,13 +650,26 @@ class HybridStructuralModel(nn.Module):
 
 class CompositeStructuralModel(nn.Module):
     """
-    Robust structural model implementing the 'General Formulation' composition:
-    
-    1. Resolve Static Geometry: u = (I - B_s)^-1 xi
-    2. Dynamic Attention: a = Attn(u)
-    3. Fusion: h = G * u + (1-G) * a
-    
-    This avoids fixed-point instability and ensures clean identification.
+    Robust structural model implementing the 'General Formulation' composition.
+
+    This is the DEFAULT structural model used by GSEMBackbone (structure_type='composite').
+
+    Forward pass (three sequential stages):
+        1. Static geometry:  u = (I - B_s)^{-1} xi
+        2. Dynamic attention: a = Attn(u)
+        3. Gated fusion:     h = alpha * u + (1 - alpha) * a
+
+    Relationship to paper Eq.22:
+        Paper Eq.22 defines a fixed-point equation h = f(h, xi) that couples static
+        and dynamic structure simultaneously. CompositeStructuralModel approximates
+        this by applying the two components sequentially (one pass), which is
+        equivalent to a single iteration of the fixed-point scheme starting from xi.
+        This is a deliberate design choice: it avoids the convergence instability of
+        the true fixed-point iteration (HybridStructuralModel) while retaining the
+        structural inductive bias. For most practical purposes the sequential
+        approximation is sufficient; use HybridStructuralModel (structure_type='iterative')
+        only when you need the exact fixed-point semantics and can tolerate the
+        convergence overhead and occasional instability.
     """
     def __init__(
         self,
