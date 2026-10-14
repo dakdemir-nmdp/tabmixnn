@@ -139,123 +139,53 @@ def _linearized_fixed_effects(model, df, feature_names: List[str], sample_size: 
 
 
 def _collect_random_effects(model) -> pd.DataFrame:
-    """Return BLUP-style random effect estimates as a DataFrame."""
+    """Return BLUP-style random effect estimates via prediction ablation.
+
+    RE_i = mean_group_i(predict_full) - mean_group_i(predict_fixed_only)
+    This gives outcome-unit BLUPs rather than raw embedding-space values.
+    """
     enc = getattr(model, "encoder", None)
     design = getattr(model, "design", None)
-    if enc is None or not hasattr(enc, "variational_params"):
+    df = getattr(model, "_train_data", None)
+    if enc is None or not hasattr(enc, "variational_params") or df is None or design is None:
         return pd.DataFrame()
 
-    from tabmixnn.covariance.structures import KCovariance, KroneckerCovariance, GPCovariance
-
     records: List[Dict[str, Any]] = []
+    try:
+        model.eval()
+        with torch.no_grad():
+            preds_full = model.predict(df, use_random_effects=True, as_dict=False)
+            preds_fixed = model.predict(df, use_random_effects=False, as_dict=False)
+        if isinstance(preds_full, torch.Tensor):
+            preds_full = preds_full.detach().cpu().numpy()
+        if isinstance(preds_fixed, torch.Tensor):
+            preds_fixed = preds_fixed.detach().cpu().numpy()
+        re_contrib = np.asarray(preds_full).flatten() - np.asarray(preds_fixed).flatten()
+    except Exception:
+        return pd.DataFrame()
+
     for term_cfg in getattr(enc, "config", []):
         tid = term_cfg.get("term_id")
         if tid not in enc.variational_params:
             continue
-        mu_param, log_s_param = enc.variational_params[tid]
-        
-        cov = enc.cov_modules[tid] if tid in enc.cov_modules else None
-        
-        # Calculate expected Random Effects u = E[u|v]
-        # For structured covariances (GBLUP), this performs extrapolation to all levels
-        with torch.no_grad():
-            if isinstance(cov, (KCovariance, KroneckerCovariance, GPCovariance)):
-                n_total = getattr(cov, "n_levels", mu_param.shape[0])
-                all_indices = torch.arange(n_total, device=mu_param.device)
-                u_full = cov(mu_param, all_indices) # [N_total, Slopes, Emb]
-            else:
-                # IID, AR1, etc - apply transformation L if needed (usually L*v)
-                # cov(v) returns u
-                u_full = cov(mu_param) if cov else mu_param # [N_train, Slopes, Emb]
+        term_info = next((t for t in design.random_terms if t.term_id == tid), None)
+        group_col = term_info.group_col if term_info else term_cfg.get("group", tid)
+        if group_col not in df.columns:
+            continue
 
-        u_np = u_full.detach().cpu().numpy()
-        sd_np = np.exp(log_s_param.detach().cpu().numpy())
-        
-        # Covariance scale (if applicable)
-        scale = None
-        if cov is not None and hasattr(cov, "log_sigma"):
-            scale = np.exp(cov.log_sigma.detach().cpu().numpy())
+        tmp = pd.Series(re_contrib, index=df.index)
+        group_re = tmp.groupby(df[group_col]).mean()
 
-        term_info = None
-        if design is not None:
-            term_info = next((t for t in design.random_terms if t.term_id == tid), None)
-        slope_names = term_info.slope_cols if term_info else [f"slope_{j}" for j in range(u_np.shape[1])]
-        
-        # Determine Level Labels
-        # Prioritize covariance module's full_levels (handled GBLUP/Extrapolation correctly)
-        cov_levels = getattr(cov, "full_levels", None)
-        if cov_levels is not None:
-            all_labels = cov_levels
-        elif term_info and term_info.level_map:
-            inv_map = {v: k for k, v in term_info.level_map.items()}
-            # Ensure we cover the full range of output
-            all_labels = [inv_map.get(i, f"level_{i}") for i in range(u_np.shape[0])]
-        else:
-            all_labels = [f"level_{i}" for i in range(u_np.shape[0])]
-            
-        group_name = term_info.group_col if term_info else term_cfg.get("group", tid)
-
-        # Iterate over all produced levels
-        for i, level_label in enumerate(all_labels):
-            if i >= u_np.shape[0]: 
-                break
-                
-            # Attempt to determine if observed or extrapolated
-            # This is heuristics; strict checking would require checking indices mapping
-            kind = "observed"
-            sd_val_vec = None
-            if i < sd_np.shape[0] and not isinstance(cov, (KCovariance, KroneckerCovariance, GPCovariance)):
-                 # IID/AR1 case: 1-to-1 mapping
-                 sd_val_vec = sd_np[i]
-            elif isinstance(cov, (KCovariance, KroneckerCovariance, GPCovariance)):
-                 # Check if this level index i was in training set?
-                 # cov.train_indices maps train_idx -> full_idx
-                 # But we don't have reverse map easily exposed publicly
-                 # For now, label 'estimated'
-                 kind = "estimated"
-                 # We don't have posterior SD for extrapolated levels readily computed here without heavy lifting
-                 # So we leave SD as NaN for extrapolated, or use training mean SD roughly
-                 sd_val_vec = np.zeros_like(u_np[i]) * np.nan
-            else:
-                 sd_val_vec = np.zeros_like(u_np[i]) * np.nan
-
-            for slope_idx, slope_name in enumerate(slope_names):
-                est = u_np[i, slope_idx].mean()
-                
-                # Apply scale if it wasn't integrated into 'cov()' call
-                # Most cov modules include sigma in forward? 
-                # KCovariance forward: Y = L_slope @ V_e @ L_group.t(). 
-                # It does NOT multiply by sigma usually, sigma is separate in KL?
-                # Check structures.py: Scale might be needed.
-                if scale is not None:
-                     sigma_slice = scale[slope_idx] if scale.ndim > 1 else scale
-                     # Check if cov forward already applied it?
-                     # IID forward: v * noise -> no. 
-                     # We are transforming MEAN parameter. 
-                     # u = mu. Scaling by sigma happens at "gather" time in Encoder?
-                     # In encoder.py: term_contrib = (gathered_u * slopes_val).
-                     # gathered_u IS the effect.
-                     # It comes from cov_module(v).
-                     # So if cov_module includes sigma, it's there. 
-                     # Most don't include scalar sigma in forward, they return standardized u?
-                     # No, encoder.py calculates KL with sigma.
-                     # But where is sigma applied to u?
-                     pass # Revisit coherence of sigma application
-                
-                # For now assume u_np is the effect on the linear predictor scale
-                
-                sd_val = float(sd_val_vec[slope_idx].mean()) if sd_val_vec is not None else np.nan
-                records.append(
-                    {
-                        "group": group_name,
-                        "level": str(level_label),
-                        "slope": slope_name,
-                        "estimate": float(est),
-                        "sd": float(sd_val),
-                        "kind": kind,
-                        "term_id": tid,
-                    }
-                )
+        for level, est in group_re.items():
+            records.append({
+                "group": group_col,
+                "level": str(level),
+                "slope": "Intercept",
+                "estimate": float(est),
+                "sd": np.nan,
+                "kind": "ablation",
+                "term_id": tid,
+            })
     return pd.DataFrame(records)
 
 

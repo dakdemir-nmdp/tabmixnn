@@ -197,6 +197,7 @@ class TabMixNN(nn.Module):
         epochs: int = 20,
         lambda_sparse: float = 0.001,
         lambda_kl: float = 0.01,
+        kl_auto_scale: bool = True,
         lambda_dag: float = 0.0,
         lambda_contraction: float = 0.0,
         grad_clip_norm: float = 1.0,
@@ -266,6 +267,7 @@ class TabMixNN(nn.Module):
         self.epochs = epochs
         self.lambda_sparse = lambda_sparse
         self.lambda_kl = lambda_kl
+        self.kl_auto_scale = kl_auto_scale
         self.lambda_dag = lambda_dag
         self.lambda_contraction = lambda_contraction
         self.grad_clip_norm = grad_clip_norm
@@ -285,8 +287,10 @@ class TabMixNN(nn.Module):
                 self.grad_clip_norm = 0.0
 
         # Reduce KL shrinkage for pure linear mixed models to better recover variance components
-        if lambda_kl == 0.01 and hidden_dims == []:
+        # Only applies when kl_auto_scale is disabled and user hasn't changed the default
+        if lambda_kl == 0.01 and hidden_dims == [] and not kl_auto_scale:
             self.lambda_kl = 0.001
+            self.logger.debug("Pure LMM: lambda_kl reduced to 0.001 (use kl_auto_scale=True for data-driven scaling)")
 
         self.logger = get_logger("TabMixNN")
 
@@ -413,6 +417,18 @@ class TabMixNN(nn.Module):
         # 3. Transform Data
         X, Z_ind, Z_slopes, Ys = self.design.transform(train_df, mode='fit')
         
+        # 3b. Auto-scale λ_KL = 1 / mean_group_size (paper recommendation)
+        if self.kl_auto_scale and Z_ind:
+            group_sizes = []
+            for z in Z_ind:
+                z_arr = z if isinstance(z, np.ndarray) else np.asarray(z)
+                unique, counts = np.unique(z_arr[z_arr > 0], return_counts=True)
+                if len(counts) > 0:
+                    group_sizes.extend(counts.tolist())
+            if group_sizes:
+                self.lambda_kl = 1.0 / float(np.mean(group_sizes))
+                self.logger.info(f"kl_auto_scale: λ_KL set to {self.lambda_kl:.5f} (1/mean_group_size={np.mean(group_sizes):.1f})")
+
         # 4. Initialize Modules
         required_fixed_dim = X.shape[1]
         # Rebuild if encoder is missing or input dims don't match the design

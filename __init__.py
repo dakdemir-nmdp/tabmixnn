@@ -31,7 +31,7 @@ from .utils.summary import summary, parameter_estimates
 
 # Add summary method to TabMixNN
 TabMixNN.summary = lambda self, **kwargs: summary(self, **kwargs)
-TabMixNN.extract_parameters = lambda self, **kwargs: parameter_estimates(self, **kwargs)
+TabMixNN.extract_parameters = lambda self, data=None, **kwargs: parameter_estimates(self, data=data, **kwargs)
 
 # Legacy aliases - Pointing to Unified
 GeneralizedTabMixNN = TabMixNN 

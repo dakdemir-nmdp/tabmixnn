@@ -480,3 +480,198 @@ class TestRandomEffectsRecovery:
             f"TabMixNN RMSE={rmse_tabmix:.3f} should beat Ridge RMSE={rmse_ridge:.3f}. "
             f"This is the core CAR-T report question — if this fails, the claim must be softened."
         )
+
+
+# ---------------------------------------------------------------------------
+# 6. FIX-1: λ_KL auto-scaling — Sleepstudy lme4 reference values
+# ---------------------------------------------------------------------------
+
+def _make_sleepstudy():
+    """
+    Synthetic Sleepstudy dataset matching the lme4 reference DGP.
+
+    lme4 reference (Belenky et al. 2003):
+        Reaction ~ Days + (Days | Subject)
+        Fixed effects: intercept ≈ 251 ms, slope ≈ 10 ms/day
+        18 subjects × 10 days = 180 observations
+
+    We use the exact lme4 fixed-effect values as the DGP so the test is
+    deterministic and the tolerance is tight.
+    """
+    rng = np.random.default_rng(0)
+    n_subjects = 18
+    n_days = 10
+    beta0 = 251.0   # lme4 intercept
+    beta1 = 10.0    # lme4 slope (ms/day)
+    sigma_u0 = 24.7  # lme4 random intercept SD
+    sigma_u1 = 5.7   # lme4 random slope SD
+    sigma_e = 25.6   # lme4 residual SD
+
+    subjects = []
+    days_col = []
+    reactions = []
+    for s in range(n_subjects):
+        u0 = rng.normal(0, sigma_u0)
+        u1 = rng.normal(0, sigma_u1)
+        for d in range(n_days):
+            e = rng.normal(0, sigma_e)
+            y = beta0 + beta1 * d + u0 + u1 * d + e
+            subjects.append(str(s))
+            days_col.append(float(d))
+            reactions.append(y)
+    return pd.DataFrame({"Reaction": reactions, "Days": days_col, "Subject": subjects})
+
+
+class TestKLAutoScale:
+    """
+    FIX-1 validation: kl_auto_scale=True should produce λ_KL ≈ 1/10 for
+    Sleepstudy (10 obs/subject), and the fitted model should recover the
+    lme4 reference intercept (≈251 ms) and slope (≈10 ms/day) within
+    generous tolerances (±60 ms intercept, ±8 ms/day slope).
+
+    These are loose tolerances — we're checking the model is in the right
+    ballpark, not that it matches lme4 exactly.
+    """
+
+    def test_kl_auto_scale_sets_lambda(self):
+        """kl_auto_scale=True should set lambda_kl ≈ 1/mean_group_size after fit."""
+        from tabmixnn import TabMixNN, Gaussian, OutcomeSpec
+        df = _make_sleepstudy()
+        outcomes = [OutcomeSpec(name="Reaction", y="Reaction", family=Gaussian())]
+        model = TabMixNN(
+            formula="Reaction ~ Days + (1|Subject)",
+            outcomes=outcomes,
+            hidden_dims=[],
+            embedding_dim=1,
+            epochs=1,
+            lr=1e-3,
+            kl_auto_scale=True,
+            verbose=False,
+        )
+        model.fit(df)
+        # 18 subjects × 10 days → mean_group_size = 10 → λ_KL ≈ 0.1
+        assert abs(model.lambda_kl - 0.1) < 0.01, (
+            f"Expected lambda_kl ≈ 0.1 (1/10), got {model.lambda_kl:.4f}"
+        )
+
+    def test_kl_auto_scale_false_preserves_lambda(self):
+        """kl_auto_scale=False should leave lambda_kl at the user-supplied value."""
+        from tabmixnn import TabMixNN, Gaussian, OutcomeSpec
+        df = _make_sleepstudy()
+        outcomes = [OutcomeSpec(name="Reaction", y="Reaction", family=Gaussian())]
+        model = TabMixNN(
+            formula="Reaction ~ Days + (1|Subject)",
+            outcomes=outcomes,
+            hidden_dims=[],
+            embedding_dim=1,
+            epochs=1,
+            lr=1e-3,
+            lambda_kl=0.05,
+            kl_auto_scale=False,
+            verbose=False,
+        )
+        model.fit(df)
+        assert abs(model.lambda_kl - 0.05) < 1e-6, (
+            f"Expected lambda_kl=0.05 unchanged, got {model.lambda_kl}"
+        )
+
+    def test_sleepstudy_intercept_slope_vs_lme4(self):
+        """
+        Fit Sleepstudy with kl_auto_scale=True and check that the mean
+        prediction at Days=0 (intercept proxy) and the per-day slope are
+        within ±60 ms and ±8 ms/day of the lme4 reference values.
+
+        lme4 reference: intercept ≈ 251 ms, slope ≈ 10 ms/day.
+        """
+        from tabmixnn import TabMixNN, Gaussian, OutcomeSpec
+        df = _make_sleepstudy()
+        outcomes = [OutcomeSpec(name="Reaction", y="Reaction", family=Gaussian())]
+        model = TabMixNN(
+            formula="Reaction ~ Days + (1|Subject)",
+            outcomes=outcomes,
+            hidden_dims=[16],
+            embedding_dim=8,
+            epochs=500,
+            lr=5e-3,
+            kl_auto_scale=True,
+            enforce_centering=True,
+            verbose=False,
+        )
+        model.fit(df)
+
+        # Estimate intercept and slope from predictions at Days=0 and Days=9
+        df0 = df[df["Days"] == 0.0].copy()
+        df9 = df[df["Days"] == 9.0].copy()
+        pred0 = float(np.mean(model.predict(df0)))
+        pred9 = float(np.mean(model.predict(df9)))
+        slope_est = (pred9 - pred0) / 9.0
+
+        lme4_intercept = 251.0
+        lme4_slope = 10.0
+
+        assert abs(pred0 - lme4_intercept) < 60.0, (
+            f"Intercept proxy {pred0:.1f} ms deviates from lme4 {lme4_intercept} ms "
+            f"by {abs(pred0 - lme4_intercept):.1f} ms (tolerance ±60 ms)"
+        )
+        assert abs(slope_est - lme4_slope) < 8.0, (
+            f"Slope estimate {slope_est:.2f} ms/day deviates from lme4 {lme4_slope} ms/day "
+            f"by {abs(slope_est - lme4_slope):.2f} ms/day (tolerance ±8 ms/day)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 7. FIX-2: extract_parameters() returns outcome-unit BLUPs
+# ---------------------------------------------------------------------------
+
+class TestExtractParametersOutcomeUnits:
+    """
+    FIX-2 validation: _collect_random_effects() now uses prediction ablation,
+    so the returned estimates should be in outcome units and correlate with
+    true group effects (r > 0.5).
+    """
+
+    def test_random_effects_in_outcome_units(self):
+        """
+        extract_parameters() random_effects['estimate'] should correlate with
+        true group random effects (r > 0.5) after the ablation fix.
+        """
+        from tabmixnn import TabMixNN, Gaussian, OutcomeSpec
+        rng = np.random.default_rng(7)
+        n_groups, n_per = 20, 15
+        true_u = rng.normal(0, 3.0, n_groups)
+        groups = np.repeat(np.arange(n_groups), n_per).astype(str)
+        x = rng.standard_normal(n_groups * n_per)
+        u_i = true_u[np.repeat(np.arange(n_groups), n_per)]
+        y = 5.0 + 2.0 * x + u_i + rng.normal(0, 1.0, n_groups * n_per)
+        df = pd.DataFrame({"y": y, "x": x, "group": groups})
+
+        outcomes = [OutcomeSpec(name="y", y="y", family=Gaussian())]
+        model = TabMixNN(
+            formula="y ~ x + (1|group)",
+            outcomes=outcomes,
+            hidden_dims=[32],
+            embedding_dim=8,
+            epochs=200,
+            lr=5e-3,
+            kl_auto_scale=True,
+            enforce_centering=True,
+            verbose=False,
+        )
+        model.fit(df)
+
+        params = model.extract_parameters(df)
+        re_df = params["random_effects"]
+        assert not re_df.empty, "random_effects DataFrame should not be empty"
+
+        # Align estimated RE with true u by group label
+        re_by_group = re_df.groupby("level")["estimate"].mean()
+        common = [str(g) for g in range(n_groups) if str(g) in re_by_group.index]
+        assert len(common) >= 10, f"Too few matched groups: {len(common)}"
+
+        est = np.array([re_by_group[g] for g in common])
+        truth = np.array([true_u[int(g)] for g in common])
+        r = np.corrcoef(est, truth)[0, 1]
+        assert r > 0.5, (
+            f"extract_parameters() RE correlation with truth: r={r:.3f} (expected > 0.5). "
+            f"Ablation fix may not be working."
+        )
