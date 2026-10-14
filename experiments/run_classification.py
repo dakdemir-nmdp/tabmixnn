@@ -127,13 +127,13 @@ def prep_verbagg(df):
 
 
 def prep_train(df):
-    """Binary: choice (train=1, car=0). Group: id (individual)."""
+    """Binary: choice1=1 (chose train), choice2=0 (chose car). Group: id (respondent)."""
     df = df.copy()
-    df["choice_bin"] = (df["choice"] == "train").astype(int)
+    df["choice_bin"] = (df["choice"] == "choice1").astype(int)
     return df, \
-           "choice_bin ~ price1 + time1 + change1 + comfort1 + price2 + time2 + change2 + comfort2 + (1 | id)", \
+           "choice_bin ~ price1 + time1 + change1 + comfort1 + price2 + time2 + change2 + comfort2 + choiceid + (1 | id)", \
            "id", \
-           ["price1", "time1", "change1", "comfort1", "price2", "time2", "change2", "comfort2", "id"]
+           ["price1", "time1", "change1", "comfort1", "price2", "time2", "change2", "comfort2", "choiceid"]
 
 
 DATASETS = [
