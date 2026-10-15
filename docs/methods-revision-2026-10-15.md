@@ -222,19 +222,22 @@ value and output projections, not only on the attention score matrix.
 
 ## Regression benchmark findings (2026-10-15)
 
-The session 82 regression benchmark (branch `revision/methods-2026-10-15`,
-commit 4c6b55b, 88/88 tests) produced the following results with the 200-epoch
-benchmark protocol (batch=32, lr=0.005, kl_auto_scale=True):
+The session 84 regression benchmark (branch `revision/methods-2026-10-15`,
+commit 2766b6c+, 88/88 tests) produced the following results with the 200-epoch
+benchmark protocol (batch=32, lr=0.005, kl_auto_scale=True). The
+`xgboost_nogroup` baseline excludes the group column — the fair comparison
+for group-holdout evaluation.
 
-| Dataset     | TabMixNN obs RMSE | TabMixNN GH RMSE | XGBoost (w/ group) RMSE | XGBoost (no group) RMSE |
-|-------------|-------------------|------------------|-------------------------|-------------------------|
-| Sleepstudy  | 30.93             | 115.84           | 34.44                   | [see below]             |
-| ChickWeight | 13.66             | 41.97            | 22.46                   | —                       |
-| Machines    | 3.60              | 13.24            | 1.11                    | —                       |
-| Oxboys      | 0.97              | 12.80            | 2.27                    | —                       |
-| Loblolly    | 1.97              | 1.56             | 1.36                    | —                       |
+| Dataset     | TabMixNN obs | TabMixNN GH | XGB+group | XGB-nogroup | LMM (fixed) |
+|-------------|-------------|-------------|-----------|-------------|-------------|
+| Sleepstudy  | 30.93        | 115.84      | 34.44     | 49.45       | 47.08       |
+| ChickWeight | 13.66        | 41.97       | 22.46     | 37.12       | 36.43       |
+| Machines    | 3.60         | 13.24       | 1.11      | 5.75        | 5.42        |
+| Oxboys      | 0.97         | 12.80       | 2.27      | 8.44        | 8.01        |
+| Loblolly    | 1.97         | 1.56        | 1.36      | 1.74        | 3.23        |
 
-TabMixNN wins: obs CV 3/5, group-holdout 0/5.
+TabMixNN wins (obs CV vs XGB+group): 3/5. Obs CV vs XGB-nogroup: 4/5.
+Group-holdout vs XGB+group: 0/5. Group-holdout vs XGB-nogroup: 1/5 (Loblolly).
 
 ### Sleepstudy group-holdout collapse — root cause diagnosis
 
