@@ -220,6 +220,43 @@ No contraction theorem for the gated block follows from row-normalized
 attention weights alone: the spectral norm of the full map depends on the
 value and output projections, not only on the attention score matrix.
 
+## Benchmark scripts and paper tables
+
+The diagnostic scripts in `experiments/` are **not a reproduction** of Tables
+2–3 of arXiv:2512.23787. The original per-fold outputs, configurations, and
+raw predictions for those tables are **unavailable** in this repository. No
+claim is made that the current scripts reproduce the published win rates or
+RMSE reductions.
+
+The M25 audit found specific inconsistencies between the paper text and its
+tables: §5.3.2 reports Oxboys/Gasoline/Machines RMSE reductions of
+93%/68%/61%, while Table 3 lists 41.1%/42.9%/75.9%. Table 7 states
+standardized targets but reports RMSE 34.95 for full random effects. Table 2
+lists 19 regression datasets while Table 3 lists 15 without accounting for
+omitted cases. These discrepancies cannot be resolved without the original
+versioned outputs; they must be corrected before resubmission.
+
+The revised diagnostic scripts address the M24 protocol defects:
+
+- All scripts share a single split manifest (`experiments/splits.py`,
+  `SPLIT_SEED = 20261015`, `SPLIT_VERSION = "1"`). TabMixNN, XGBoost, and the
+  LMM reference use identical train/test row indices.
+- Preprocessing (label encoding, standardization) is fitted on the training
+  partition only and applied to the test partition.
+- A statsmodels `MixedLM` (ML, not REML) reference is included in
+  `run_regression.py` as `cv_lmm`. It reports fixed-effects-only predictions
+  for test observations, which is the conservative baseline for unseen groups.
+- Per-fold raw RMSE values are saved to `experiments/results/regression_raw.json`
+  alongside the aggregate CSV, enabling downstream audit.
+- Group-holdout evaluation (25% of groups held out entirely) is reported
+  separately from observation-level CV. The two must not be compared directly:
+  group-holdout tests generalisation to unseen groups; observation CV does not.
+- The `run_all.py` Train dataset label bug ("train" vs "choice1") is corrected.
+  The Ecdat Train dataset encodes the train-choice level as "choice1".
+
+These scripts establish a reproducible diagnostic baseline for the current
+implementation. They do not establish the claims in the published tables.
+
 ## Claims to remove from the manuscript
 
 Remove or replace with accurate descriptions: exact REML recovery, exact

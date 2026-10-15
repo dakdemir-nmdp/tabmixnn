@@ -2,6 +2,8 @@
 """
 Run each benchmark dataset in a fresh subprocess to avoid MPS memory segfaults.
 Usage: python experiments/run_all.py [--regression-only] [--classification-only]
+
+Split seed: 20261015 (matches experiments/splits.py SPLIT_SEED).
 """
 import json
 import subprocess
@@ -49,7 +51,7 @@ for col in xgb_features:
     if df[col].dtype == object or str(df[col].dtype) == "category":
         df[col] = LabelEncoder().fit_transform(df[col].astype(str))
 
-kf = KFold(n_splits=5, shuffle=True, random_state=42)
+kf = KFold(n_splits=5, shuffle=True, random_state=20261015)
 tab_rmses, tab_r2s, xgb_rmses, xgb_r2s = [], [], [], []
 
 for tr_idx, te_idx in kf.split(df):
@@ -65,7 +67,7 @@ for tr_idx, te_idx in kf.split(df):
 
     X_tr, y_tr = df.iloc[tr_idx][xgb_features].values, df.iloc[tr_idx][outcome].values
     X_te, y_te = df.iloc[te_idx][xgb_features].values, df.iloc[te_idx][outcome].values
-    xgb = XGBRegressor(n_estimators=200, learning_rate=0.05, random_state=42, verbosity=0)
+    xgb = XGBRegressor(n_estimators=200, learning_rate=0.05, random_state=20261015, verbosity=0)
     xgb.fit(X_tr, y_tr)
     xp = xgb.predict(X_te)
     xgb_rmses.append(float(np.sqrt(np.mean((xp - y_te)**2))))
@@ -125,12 +127,13 @@ elif name == "VerbAgg":
     xgb_feat = ["Anger", "Gender_bin", "btype_enc", "situ_enc", "mode_enc"]
 
 elif name == "Train":
-    df["choice_bin"] = (df["choice"] == "train").astype(int)
+    # "choice1" is the train-choice level in the Ecdat Train dataset.
+    df["choice_bin"] = (df["choice"] == "choice1").astype(int)
     outcome  = "choice_bin"
-    formula  = "choice_bin ~ price1 + time1 + change1 + comfort1 + price2 + time2 + change2 + comfort2 + (1 | id)"
-    xgb_feat = ["price1","time1","change1","comfort1","price2","time2","change2","comfort2","id"]
+    formula  = "choice_bin ~ price1 + time1 + change1 + comfort1 + price2 + time2 + change2 + comfort2 + choiceid + (1 | id)"
+    xgb_feat = ["price1","time1","change1","comfort1","price2","time2","change2","comfort2","choiceid","id"]
 
-kf = KFold(n_splits=5, shuffle=True, random_state=42)
+kf = KFold(n_splits=5, shuffle=True, random_state=20261015)
 tab_aucs, tab_accs, xgb_aucs, xgb_accs = [], [], [], []
 
 for tr_idx, te_idx in kf.split(df):
@@ -150,7 +153,7 @@ for tr_idx, te_idx in kf.split(df):
     y_tr = df.iloc[tr_idx][outcome].values
     X_te = df.iloc[te_idx][xgb_feat].values
     y_te = df.iloc[te_idx][outcome].values
-    xgb = XGBClassifier(n_estimators=200, learning_rate=0.05, random_state=42,
+    xgb = XGBClassifier(n_estimators=200, learning_rate=0.05, random_state=20261015,
                         verbosity=0, eval_metric="logloss")
     xgb.fit(X_tr, y_tr)
     xp = xgb.predict_proba(X_te)[:, 1]
@@ -187,7 +190,7 @@ def main():
 
     if not cls_only:
         print("\n" + "="*60)
-        print("REGRESSION BENCHMARK (5-fold CV)")
+        print("REGRESSION BENCHMARK (5-fold CV, split_seed=20261015)")
         print("="*60)
         for display, loader, formula, outcome, group, xgb_cols in REGRESSION_DATASETS:
             print(f"\n  {display}...", flush=True)
@@ -219,7 +222,7 @@ def main():
 
     if not reg_only:
         print("\n" + "="*60)
-        print("CLASSIFICATION BENCHMARK (5-fold CV)")
+        print("CLASSIFICATION BENCHMARK (5-fold CV, split_seed=20261015)")
         print("="*60)
         for display, loader in CLASSIFICATION_DATASETS:
             print(f"\n  {display}...", flush=True)

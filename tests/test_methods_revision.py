@@ -496,3 +496,130 @@ def test_methods_revision_describes_ablation_not_shapley():
     text = doc.read_text()
     assert 'feature_ablation_values' in text
     assert 'single-feature mean ablation' in text.lower() or 'single-feature mean ablations' in text.lower()
+
+
+# ---------------------------------------------------------------------------
+# Item 5 — Benchmark integrity tests (M24 / M25)
+# ---------------------------------------------------------------------------
+
+def test_split_manifest_is_deterministic_and_versioned():
+    """obs_kfold and group_holdout must produce identical results on repeated calls."""
+    from experiments.splits import obs_kfold, group_holdout, SPLIT_SEED, SPLIT_VERSION
+
+    assert isinstance(SPLIT_SEED, int)
+    assert isinstance(SPLIT_VERSION, str)
+
+    df = toy()
+    folds_a = [(tr.tolist(), te.tolist()) for tr, te in obs_kfold(df, n_splits=3)]
+    folds_b = [(tr.tolist(), te.tolist()) for tr, te in obs_kfold(df, n_splits=3)]
+    assert folds_a == folds_b, "obs_kfold must be deterministic"
+
+    train_a, test_a = group_holdout(df, "g")
+    train_b, test_b = group_holdout(df, "g")
+    np.testing.assert_array_equal(train_a, train_b)
+    np.testing.assert_array_equal(test_a, test_b)
+
+
+def test_split_manifest_folds_are_disjoint_and_cover_all_rows():
+    """Every obs_kfold split must be disjoint and together cover all rows."""
+    from experiments.splits import obs_kfold
+
+    df = toy()
+    all_test = []
+    for tr_idx, te_idx in obs_kfold(df, n_splits=3):
+        assert len(set(tr_idx) & set(te_idx)) == 0, "train/test must be disjoint"
+        all_test.extend(te_idx.tolist())
+    assert sorted(all_test) == list(range(len(df))), "test folds must cover all rows"
+
+
+def test_group_holdout_holds_out_correct_fraction():
+    """group_holdout must hold out groups and produce non-overlapping partitions."""
+    from experiments.splits import group_holdout
+
+    df = toy()
+    train_mask, test_mask = group_holdout(df, "g", holdout_frac=0.25)
+    assert train_mask.any() and test_mask.any()
+    held_groups = set(df.loc[test_mask, "g"].unique())
+    train_groups = set(df.loc[train_mask, "g"].unique())
+    assert len(held_groups & train_groups) == 0, "held groups must not appear in train"
+
+
+def test_run_all_train_label_uses_choice1():
+    """run_all.py must encode the Train outcome as choice == 'choice1', not 'train'."""
+    import pathlib
+    src = pathlib.Path(__file__).parent.parent / "experiments" / "run_all.py"
+    text = src.read_text()
+    assert '"choice1"' in text, "run_all.py must use 'choice1' for Train label"
+    assert '"choice" == "train"' not in text, (
+        "run_all.py must not use the incorrect 'train' label for Train dataset"
+    )
+
+
+def test_run_regression_uses_canonical_split_seed():
+    """run_regression.py must import from experiments.splits (not hardcode seed 42)."""
+    import pathlib
+    src = pathlib.Path(__file__).parent.parent / "experiments" / "run_regression.py"
+    text = src.read_text()
+    assert "from experiments.splits import" in text, (
+        "run_regression.py must import splits from experiments.splits"
+    )
+    assert "random_state=42" not in text, (
+        "run_regression.py must not hardcode random_state=42; use SPLIT_SEED from splits.py"
+    )
+
+
+def test_run_regression_includes_lmm_benchmark():
+    """run_regression.py must include a statsmodels LMM baseline (cv_lmm)."""
+    import pathlib
+    src = pathlib.Path(__file__).parent.parent / "experiments" / "run_regression.py"
+    text = src.read_text()
+    assert "cv_lmm" in text, "run_regression.py must define and call cv_lmm"
+    assert "MixedLM" in text or "statsmodels" in text, (
+        "run_regression.py must reference statsmodels MixedLM for the LMM benchmark"
+    )
+
+
+def test_run_regression_saves_raw_per_fold_output():
+    """run_regression.py must save per-fold raw outputs to a JSON file."""
+    import pathlib
+    src = pathlib.Path(__file__).parent.parent / "experiments" / "run_regression.py"
+    text = src.read_text()
+    assert "regression_raw.json" in text, (
+        "run_regression.py must save per-fold outputs to regression_raw.json"
+    )
+
+
+def test_methods_revision_benchmark_section_disclaims_paper_tables():
+    """The methods revision doc must state that current scripts do not reproduce
+    the paper's Tables 2-3 and that original artifacts are unavailable."""
+    import pathlib
+    doc = pathlib.Path(__file__).parent.parent / "docs" / "methods-revision-2026-10-15.md"
+    text = doc.read_text().lower()
+    assert "not a reproduction" in text or "do not reproduce" in text, (
+        "methods-revision doc must state that benchmark scripts do not reproduce paper tables"
+    )
+    assert "original" in text and (
+        "unavailable" in text or "not available" in text or "not present" in text
+    ), (
+        "methods-revision doc must state that original artifacts are unavailable"
+    )
+
+
+def test_methods_revision_benchmark_section_names_split_seed():
+    """The methods revision doc must name the split seed used in diagnostic scripts."""
+    import pathlib
+    doc = pathlib.Path(__file__).parent.parent / "docs" / "methods-revision-2026-10-15.md"
+    text = doc.read_text()
+    assert "20261015" in text, (
+        "methods-revision doc must name the canonical split seed 20261015"
+    )
+
+
+def test_methods_revision_benchmark_section_names_lmm_benchmark():
+    """The methods revision doc must mention the LMM reference benchmark."""
+    import pathlib
+    doc = pathlib.Path(__file__).parent.parent / "docs" / "methods-revision-2026-10-15.md"
+    text = doc.read_text().lower()
+    assert "lmm" in text or "mixedlm" in text or "linear mixed" in text, (
+        "methods-revision doc must mention the LMM reference benchmark"
+    )
