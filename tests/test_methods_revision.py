@@ -447,3 +447,52 @@ def test_methods_revision_contains_no_fixed_point_equivalence_claim():
     ]
     hits = [p for p in forbidden if re.search(p, body)]
     assert not hits, f"Forbidden fixed-point equivalence phrases found: {hits}"
+
+
+def test_feature_ablation_values_exists_and_shapley_values_is_deprecated():
+    """feature_ablation_values must exist; shapley_values must emit DeprecationWarning."""
+    import warnings
+    model = TabMixNN.lmm('y ~ x', epochs=2, verbose=False).fit(toy())
+    # New name works and returns ablation_values key
+    result = model.feature_ablation_values(toy(), background_size=5)
+    assert 'ablation_values' in result
+    assert 'feature_names' in result
+    # Old name emits DeprecationWarning
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        model.shapley_values(toy(), background_size=5)
+    assert any(issubclass(x.category, DeprecationWarning) for x in w)
+
+
+def test_random_effect_ablations_exists_and_shapley_random_effects_is_deprecated():
+    """random_effect_ablations must exist; shapley_random_effects must emit DeprecationWarning."""
+    import warnings
+    df_data = toy()
+    model = TabMixNN.lmm('y ~ x + (1|g)', epochs=2, verbose=False).fit(df_data)
+    # New name works and returns ablation_value column when random terms exist
+    result = model.random_effect_ablations(df_data)
+    assert hasattr(result, 'columns')
+    if len(result) > 0:
+        assert 'ablation_value' in result.columns
+    # Old name emits DeprecationWarning regardless
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        model.shapley_random_effects(df_data)
+    assert any(issubclass(x.category, DeprecationWarning) for x in w)
+
+
+def test_shapley_sam_edges_raises_not_implemented():
+    """shapley_sam_edges must raise NotImplementedError unconditionally."""
+    import pytest
+    model = TabMixNN.lmm('y ~ x', epochs=2, verbose=False).fit(toy())
+    with pytest.raises(NotImplementedError):
+        model.shapley_sam_edges()
+
+
+def test_methods_revision_describes_ablation_not_shapley():
+    """The methods revision doc must describe feature sensitivity as ablation, not Shapley."""
+    import pathlib
+    doc = pathlib.Path(__file__).parent.parent / 'docs' / 'methods-revision-2026-10-15.md'
+    text = doc.read_text()
+    assert 'feature_ablation_values' in text
+    assert 'single-feature mean ablation' in text.lower() or 'single-feature mean ablations' in text.lower()

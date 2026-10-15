@@ -171,6 +171,17 @@ up under interactions, and do not identify separate random slopes. Binomial
 ablations use probability units. Linearized fixed effects are average
 derivatives on the primary predictor scale, not conventional global coefficients.
 
+Feature-level sensitivity is reported as **single-feature mean ablations**
+(`feature_ablation_values`): each feature is replaced by its background mean
+and the change in prediction is recorded. This is a marginal sensitivity
+measure. It is not a Shapley value: it does not average over feature coalitions
+and does not satisfy efficiency, symmetry, or dummy-player axioms. Do not
+describe these outputs as SHAP values. The deprecated `shapley_values()` and
+`shapley_random_effects()` aliases remain for backward compatibility but emit
+`DeprecationWarning`. Edge attribution (`shapley_sam_edges`) raises
+`NotImplementedError` unconditionally; no coalition-based edge method is
+implemented.
+
 Covariance summaries generally describe encoder-space scales. They are not
 automatically outcome-unit variance components or ICCs in nonlinear models.
 Standard errors and p values are not implemented. Conditional plug-in log

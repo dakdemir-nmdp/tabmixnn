@@ -1639,14 +1639,19 @@ class TabMixNN(nn.Module):
             'edge_std': pd.DataFrame()
         }
 
-    def shapley_values(self, df, background_size=50, seed=42):
+    def feature_ablation_values(self, df, background_size=50, seed=42):
         """
-        Approximate feature Shapley values via per-feature ablation on the fixed design matrix.
+        Per-feature mean ablation on the fixed design matrix.
+
+        For each feature j, replaces column j with its background mean and records
+        the change in prediction.  This is a single-feature marginal ablation, not
+        a Shapley value: it does not average over coalitions and does not satisfy
+        the Shapley axioms.  Use it as a descriptive sensitivity measure only.
 
         Strategy:
-            - Use the model's compiled design to obtain the fixed-effect design matrix X and random inputs.
             - Baseline = mean prediction over a small background sample.
-            - For each sample i and feature j: SHAP_ij = pred_i - pred_i_with_feature_j_replaced_by_background_mean.
+            - For each sample i and feature j:
+              ablation_ij = pred_i - pred_i_with_feature_j_replaced_by_background_mean.
         """
         if self.design is None:
             raise RuntimeError("Model design is not initialized. Fit the model before calling shapley_values.")
@@ -1718,25 +1723,47 @@ class TabMixNN(nn.Module):
             shap_values[:, j] = orig_preds - preds_mod
 
         return {
-            "shap_values": shap_values.cpu().numpy(),
+            "ablation_values": shap_values.cpu().numpy(),
             "feature_names": feature_names,
             "base_value": base_value,
             "predictions": orig_preds.cpu().numpy(),
         }
 
-    def plot_shap_summary(self, df, max_features=10):
-        """Placeholder for SHAP plot."""
+    def shapley_values(self, df, background_size=50, seed=42):
+        """Deprecated: use feature_ablation_values."""
+        import warnings
+        warnings.warn(
+            "shapley_values() is a misnomer; this method computes single-feature mean ablations, "
+            "not Shapley values. Use feature_ablation_values() instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+        return self.feature_ablation_values(df, background_size=background_size, seed=seed)
+
+    def plot_feature_ablation_summary(self, df, max_features=10):
+        """Bar plot of mean absolute ablation values across features."""
         import matplotlib.pyplot as plt
         fig = plt.figure()
-        plt.text(0.5, 0.5, "SHAP Summary Placeholder")
+        plt.text(0.5, 0.5, "Feature Ablation Summary Placeholder")
         return fig
 
-    def shapley_random_effects(self, df, outcome=None):
-        """
-        Approximate Shapley values for random-effect terms by ablating each term's contribution.
+    def plot_shap_summary(self, df, max_features=10):
+        """Deprecated: use plot_feature_ablation_summary."""
+        import warnings
+        warnings.warn(
+            "plot_shap_summary() is deprecated. Use plot_feature_ablation_summary() instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+        return self.plot_feature_ablation_summary(df, max_features=max_features)
 
+    def random_effect_ablations(self, df, outcome=None):
+        """
+        Per-term random-effect ablations: for each random term, zeros its variational
+        mean and records the change in prediction.
+
+        This is a single-term marginal ablation, not a Shapley allocation.  Terms
+        are not independent; contributions need not sum to the full prediction.
         For each random term:
-            shap_value = pred_full - pred_with_term_zeroed
+            ablation = pred_full - pred_with_term_zeroed
         """
         if self.design is None:
             raise RuntimeError("Model design is not initialized. Fit the model before calling shapley_random_effects.")
@@ -1787,16 +1814,26 @@ class TabMixNN(nn.Module):
                     "term_id": tid,
                     "group_col": group_col,
                     "group_id": gid_label,
-                    "shap_value": shap_term[i],
+                    "ablation_value": shap_term[i],
                     "baseline": baseline[i],
                     "prediction": full_preds.cpu().numpy()[i],
                 })
 
         return pd.DataFrame(records)
 
+    def shapley_random_effects(self, df, outcome=None):
+        """Deprecated: use random_effect_ablations."""
+        import warnings
+        warnings.warn(
+            "shapley_random_effects() is a misnomer; this method computes single-term ablations, "
+            "not Shapley values. Use random_effect_ablations() instead.",
+            DeprecationWarning, stacklevel=2,
+        )
+        return self.random_effect_ablations(df, outcome=outcome)
+
     def _predict_from_tensors(self, X, Z_ind, Z_slopes, use_random_effects: bool = True):
-        """Internal helper to run forward pass given tensors and return 1D predictions for SHAP.
-        
+        """Internal helper: run forward pass and return 1D predictions for ablation methods.
+
         For survival outcomes, returns Expected Time Lost (ETL) = area under incidence curve.
         """
         with torch.no_grad():
@@ -1858,8 +1895,16 @@ class TabMixNN(nn.Module):
             return torch.zeros(X.shape[0], device=self.device)
 
     def shapley_sam_edges(self, layer='output', df=None, n_samples=50, seed=42):
-        """Placeholder for SAM Edge Shapley."""
-        raise NotImplementedError("Edge Shapley estimation is not implemented.")
+        """Edge attribution is not implemented.
+
+        A coalition-based edge Shapley method requires enumerating subsets of
+        structural edges, which is combinatorially expensive and not validated.
+        This method raises NotImplementedError unconditionally.
+        """
+        raise NotImplementedError(
+            "Edge attribution (shapley_sam_edges) is not implemented. "
+            "Use feature_ablation_values() for feature-level sensitivity."
+        )
 
     def _get_outcome_col(self, outcome=None):
         """Get the column name for the outcome."""
