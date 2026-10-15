@@ -225,10 +225,14 @@ class MixedEffectsRepresentation(nn.Module):
         wrapper = SimpleNamespace(weight=mu_param)
         setattr(self, f"random_intercept_embeddings_{group_name}", wrapper)
 
-    def forward(self, X, Z_indices, Z_slopes, use_random_effects: bool = True):
+    def forward(self, X, Z_indices, Z_slopes, use_random_effects: bool = True,
+                 _transductive_override: Optional[Dict[str, torch.Tensor]] = None):
         # X: [batch, fixed_dim]
         # Z_indices: list of [batch] indices
         # Z_slopes: list of [batch, n_slopes]
+        # _transductive_override: optional dict {term_id: [batch, n_slopes, emb]} with
+        #   pre-computed per-sample random effect embeddings for unseen groups.
+        #   Samples with index != 0 are ignored (their gathered_u is used as normal).
         
         # Fixed part
         fixed_out = self.fixed_linear(X)
@@ -251,7 +255,9 @@ class MixedEffectsRepresentation(nn.Module):
                 cov_module = self.cov_modules[tid]
                 
                 # Enforce centering (orthogonality to intercept)
-                if self.enforce_centering and isinstance(cov_module, (IIDCovariance, UnstructuredSlopeCovariance)):
+                if self.enforce_centering and isinstance(cov_module, (IIDCovariance, UnstructuredSlopeCovariance,
+                                                                       AR1Covariance, ARMACovariance,
+                                                                       CompoundSymmetryCovariance)):
                      # mu: [n_levels, n_slopes, emb]
                      mu_mean = mu.mean(dim=0, keepdim=True)
                      mu = mu - mu_mean
@@ -345,6 +351,13 @@ class MixedEffectsRepresentation(nn.Module):
                         unknown_row = u_expected.mean(dim=0, keepdim=True)
                     u_padded = torch.cat([unknown_row, u_expected], dim=0)
                     gathered_u = u_padded.index_select(0, indices.clamp(min=0))
+                    # Transductive override: replace per-sample embeddings for unseen groups
+                    # that have been adapted via E-step in adapt_unseen_groups().
+                    if _transductive_override is not None and tid in _transductive_override:
+                        unseen_mask = (indices == 0)
+                        if unseen_mask.any():
+                            gathered_u = gathered_u.clone()
+                            gathered_u[unseen_mask] = _transductive_override[tid][unseen_mask]
                 
                 # Weighted sum
                 term_contrib = (gathered_u * slopes_val.unsqueeze(-1)).sum(dim=1)

@@ -567,6 +567,198 @@ class TabMixNN(nn.Module):
     def predict_proba(self, df, outcome=None, as_dict: Optional[bool] = None):
         return self.predict(df, outcome=outcome, mode='proba', as_dict=as_dict)
 
+    def adapt_unseen_groups(
+        self,
+        df: pd.DataFrame,
+        n_steps: int = 50,
+        lr: float = 0.01,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Transductive E-step: for each unseen group in df, optimize a per-group
+        variational embedding on that group's observations with backbone frozen.
+
+        Returns a _transductive_override dict {term_id: [n_samples, n_slopes, emb]}
+        that can be passed to forward() via _transductive_override.
+
+        This implements empirical Bayes / BLUP-style prediction for unseen groups:
+        instead of falling back to the prior mean (unknown_params), we find the
+        posterior mode for each unseen group given its test observations.
+
+        Args:
+            df: Test dataframe (may contain unseen groups).
+            n_steps: Number of gradient steps per unseen group (default 50).
+            lr: Learning rate for the E-step optimizer (default 0.01).
+
+        Returns:
+            override dict {term_id: tensor[n_samples, n_slopes, emb]} on self.device.
+            Pass this as _transductive_override to forward() or use predict_transductive().
+        """
+        if self.design is None or self.encoder is None:
+            raise RuntimeError("Model must be fitted before adapt_unseen_groups.")
+
+        X_np, Z_ind_np, Z_slopes_np, Ys_np = self.design.transform(df, mode='predict')
+        n_samples = X_np.shape[0]
+
+        # Build full-batch tensors (E-step is per-group, not mini-batch)
+        X_t = torch.tensor(X_np, dtype=torch.float32, device=self.device)
+        Z_ind_t = [torch.tensor(z, dtype=torch.long, device=self.device) for z in Z_ind_np]
+        Z_slopes_t = [torch.tensor(z, dtype=torch.float32, device=self.device) for z in Z_slopes_np]
+        Ys_t = {k: torch.tensor(v, dtype=torch.float32, device=self.device) for k, v in Ys_np.items()}
+
+        # Freeze all backbone parameters; only the per-group params will be optimized
+        backbone_params = []
+        for name, p in self.named_parameters():
+            if not name.startswith('encoder.variational_params') and not name.startswith('encoder.unknown_params'):
+                backbone_params.append(p)
+        for p in backbone_params:
+            p.requires_grad_(False)
+
+        # Build override tensors: start from unknown_params (prior mean) for each term
+        override: Dict[str, torch.Tensor] = {}
+        for i, term_cfg in enumerate(self.encoder.config):
+            tid = term_cfg['term_id']
+            if i >= len(Z_ind_t):
+                continue
+            indices = Z_ind_t[i]  # [n_samples]
+            unseen_mask = (indices == 0)  # samples belonging to unseen groups
+            if not unseen_mask.any():
+                continue
+
+            # Identify unique unseen groups by their original group column values
+            group_col = term_cfg.get('group', None)
+            if group_col is None or group_col not in df.columns:
+                continue
+
+            n_slopes = Z_slopes_t[i].shape[1] if Z_slopes_t[i].ndim > 1 else 1
+            emb_dim = self.encoder.embedding_dim
+
+            # Initialize override tensor from unknown_params (prior mean)
+            if tid in self.encoder.unknown_params:
+                init_val = self.encoder.unknown_params[tid].detach().clone()  # [1, n_slopes, emb]
+            else:
+                init_val = torch.zeros(1, n_slopes, emb_dim, device=self.device)
+
+            # Full override tensor for all samples; non-unseen rows won't be used
+            override_term = init_val.expand(n_samples, -1, -1).clone()  # [n_samples, n_slopes, emb]
+
+            # Adapt per unique unseen group
+            unseen_group_labels = df.loc[unseen_mask.cpu().numpy().astype(bool), group_col].unique()
+            for grp_label in unseen_group_labels:
+                grp_mask_np = (df[group_col].values == grp_label) & unseen_mask.cpu().numpy().astype(bool)
+                grp_mask = torch.tensor(grp_mask_np, dtype=torch.bool, device=self.device)
+                if not grp_mask.any():
+                    continue
+
+                # Learnable embedding for this group
+                grp_emb = nn.Parameter(init_val.clone().squeeze(0))  # [n_slopes, emb]
+                opt = torch.optim.Adam([grp_emb], lr=lr)
+
+                # Subset tensors for this group
+                X_grp = X_t[grp_mask]
+                Z_ind_grp = [z[grp_mask] for z in Z_ind_t]
+                Z_slopes_grp = [z[grp_mask] for z in Z_slopes_t]
+                Ys_grp = {k: v[grp_mask] for k, v in Ys_t.items()}
+
+                self.train()  # enable dropout etc. during E-step
+                for _ in range(n_steps):
+                    opt.zero_grad()
+                    # Build per-sample override for this group only
+                    n_grp = X_grp.shape[0]
+                    grp_override = {tid: grp_emb.unsqueeze(0).expand(n_grp, -1, -1)}
+                    outputs = self.forward(X_grp, Z_ind_grp, Z_slopes_grp,
+                                          _transductive_override=grp_override)
+                    outputs_dict = self._ensure_dict_outputs(outputs)
+                    loss = torch.tensor(0.0, device=self.device)
+                    for name, target in Ys_grp.items():
+                        family = self.data_family(name)
+                        mask_nan = ~torch.isnan(target).any(dim=1) if target.ndim > 1 else ~torch.isnan(target)
+                        if not mask_nan.any():
+                            continue
+                        pred = outputs_dict[name][mask_nan]
+                        tgt = target[mask_nan]
+                        theta = family.forward_params(pred)
+                        loss = loss + family.nll(theta, tgt)
+                    # KL regularization: N(grp_emb, I) vs N(0, I)
+                    kl_reg = 0.5 * (grp_emb ** 2).sum()
+                    loss = loss + self.lambda_kl * kl_reg
+                    loss.backward()
+                    opt.step()
+
+                # Store adapted embedding for all samples of this group
+                with torch.no_grad():
+                    override_term[grp_mask] = grp_emb.detach().unsqueeze(0).expand(grp_mask.sum(), -1, -1)
+
+            override[tid] = override_term
+
+        # Restore backbone gradients
+        for p in backbone_params:
+            p.requires_grad_(True)
+        self.eval()
+
+        return override
+
+    def predict_transductive(
+        self,
+        df: pd.DataFrame,
+        outcome: str = None,
+        mode: str = 'default',
+        n_steps: int = 50,
+        lr: float = 0.01,
+        as_dict: Optional[bool] = None,
+    ):
+        """
+        Predict with transductive RE adaptation for unseen groups.
+
+        Runs adapt_unseen_groups() (E-step) then predict() using the adapted
+        embeddings. For seen groups, behavior is identical to predict().
+
+        Args:
+            df: Test dataframe.
+            outcome: Optional outcome name to select.
+            mode: Family-specific prediction mode.
+            n_steps: E-step gradient steps per unseen group (default 50).
+            lr: E-step learning rate (default 0.01).
+            as_dict: Return dict vs array (same semantics as predict()).
+        """
+        override = self.adapt_unseen_groups(df, n_steps=n_steps, lr=lr)
+        self.eval()
+        X, Z_ind, Z_slopes, _ = self.design.transform(df, mode='predict')
+        X_t = torch.tensor(X, dtype=torch.float32, device=self.device)
+        Z_ind_t = [torch.tensor(z, dtype=torch.long, device=self.device) for z in Z_ind]
+        Z_slopes_t = [torch.tensor(z, dtype=torch.float32, device=self.device) for z in Z_slopes]
+
+        dataset = TabMixDataset(X, Z_ind, Z_slopes, {})
+        loader, _ = self._make_dataloader(dataset, shuffle=False)
+        buffers: Dict[str, List[torch.Tensor]] = {}
+        offset = 0
+        with torch.no_grad():
+            for batch in loader:
+                bx, bz_ind, bz_slopes, _ = self._move_batch_to_device(batch)
+                batch_size = bx.shape[0]
+                # Slice override to this batch
+                batch_override = {tid: v[offset:offset + batch_size] for tid, v in override.items()} if override else None
+                outputs = self.forward(bx, bz_ind, bz_slopes, _transductive_override=batch_override)
+                outputs_dict = self._ensure_dict_outputs(outputs)
+                for name, pred_raw in outputs_dict.items():
+                    idx = self._outcome_idx(name)
+                    if idx == -1:
+                        continue
+                    family = self.design.outcomes[idx].family
+                    theta = family.forward_params(pred_raw)
+                    pred = family.predict(theta, mode=mode)
+                    if not torch.is_tensor(pred):
+                        pred = torch.as_tensor(pred, device=self.device, dtype=torch.float32)
+                    buffers.setdefault(name, []).append(pred.detach().cpu().reshape(-1))
+                offset += batch_size
+
+        results = {name: torch.cat(parts, dim=0).numpy() for name, parts in buffers.items() if parts}
+        if outcome:
+            return results.get(outcome)
+        unwrap = as_dict is False or (as_dict is None and len(results) == 1)
+        if unwrap and len(results) == 1:
+            return list(results.values())[0]
+        return results
+
     def score(self, df, outcome=None):
         metrics = self._evaluate_performance(df, outcome)
         return metrics
@@ -764,7 +956,8 @@ class TabMixNN(nn.Module):
         Ys = {k: v.to(self.device) for k, v in Ys.items()}
         return X, Z_ind, Z_slopes, Ys
 
-    def forward(self, X, Z_ind=None, Z_slopes=None, return_attention=False, use_random_effects: bool = True):
+    def forward(self, X, Z_ind=None, Z_slopes=None, return_attention=False, use_random_effects: bool = True,
+                 _transductive_override=None):
         """Forward pass."""
         # Handle legacy positional args / missing args
         if Z_ind is None: Z_ind = []
@@ -786,7 +979,8 @@ class TabMixNN(nn.Module):
                 Z_slopes = [torch.ones(X.shape[0], 1, device=X.device)] * len(Z_ind)
 
         # 1. Encode
-        h_encoded, kl_encoder = self.encoder(X, Z_ind, Z_slopes, use_random_effects=use_random_effects)
+        h_encoded, kl_encoder = self.encoder(X, Z_ind, Z_slopes, use_random_effects=use_random_effects,
+                                             _transductive_override=_transductive_override)
         self.current_kl = kl_encoder
         
         if self.input_proj:
