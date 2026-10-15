@@ -360,3 +360,34 @@ def test_all_missing_minibatch_has_zero_likelihood_gradient():
     loss.backward()
     assert pred.grad.item() == 0
     assert np.isfinite(model.predict(df)).all()
+
+
+def test_dag_penalty_is_zero_and_sparsity_penalty_is_not():
+    """
+    dag_penalty must be identically zero for any B values because B is strictly
+    lower-triangular by construction (tril_mask zeros diagonal and upper triangle),
+    making it a DAG unconditionally.  The old NOTEARS formula trace(exp(B*B))-dim
+    was also zero for the same reason: diag(B*B)=0 always.
+
+    sparsity_penalty must be positive whenever B has nonzero entries, confirming
+    it is the only active structural regulariser.
+    """
+    from tabmixnn.layers.structural import StaticStructureModel
+    model = StaticStructureModel(4, sparse_penalty=1.0)
+    # Fill B_raw with nonzero values so any non-trivial penalty would fire.
+    with torch.no_grad():
+        model.B_raw.fill_(2.0)
+    assert model.dag_penalty().item() == 0.0
+    assert model.sparsity_penalty().item() > 0.0
+    # Confirm B is strictly lower-triangular regardless of B_raw values.
+    B = model.B
+    assert torch.equal(B, torch.tril(B, diagonal=-1))
+
+
+def test_lambda_dag_removed_from_model():
+    """lambda_dag must not appear as a constructor parameter or stored attribute."""
+    import inspect
+    sig = inspect.signature(TabMixNN.__init__)
+    assert 'lambda_dag' not in sig.parameters
+    m = TabMixNN.lmm('y ~ x', epochs=1, verbose=False)
+    assert not hasattr(m, 'lambda_dag')

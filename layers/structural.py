@@ -105,8 +105,13 @@ class MeasurementModel(nn.Module):
 
 class StaticStructureModel(nn.Module):
     """
-    Static structural dependencies (classical SEM).
+    Static structural dependencies.
     Implements: B_s η where B_s is strictly lower-triangular.
+
+    The triangular mask enforces acyclicity unconditionally; no DAG penalty is
+    needed or meaningful. The sparsity penalty encourages sparse edge weights
+    but carries no causal interpretation: latent rotations and reparameterisations
+    prevent identification of structural edges as causal effects.
     """
 
     def __init__(
@@ -198,10 +203,11 @@ class StaticStructureModel(nn.Module):
                 )
     
     def dag_penalty(self):
-        B = self.B
-        M = torch.matrix_exp(B * B)
-        return torch.trace(M) - self.dim
-    
+        """Deprecated: always returns zero because B is strictly lower-triangular by
+        construction (tril_mask zeros the diagonal and upper triangle), making it a
+        DAG unconditionally. Use sparsity_penalty() to encourage sparse edge weights."""
+        return self.B.new_zeros(())
+
     def sparsity_penalty(self):
         return self.sparse_penalty_weight * torch.abs(self.B).sum()
     
@@ -519,8 +525,13 @@ class DynamicStructureModel(nn.Module):
 
 class HybridStructuralModel(nn.Module):
     """
-    Combines static SEM structure with dynamic attention.
-    Implements: η = (I - B_s - B_d(η))^{-1} ξ
+    Combines static and dynamic structure via fixed-point iteration.
+    Attempts to solve: η = ξ + B_s η + B_d(η) η
+
+    Convergence requires spectral norm of (B_s + B_d) < 1, which is not
+    guaranteed. Use lambda_contraction > 0 to encourage contraction during
+    training. If the iteration does not converge within max_iter steps a
+    warning is logged; consider CompositeStructuralModel for stability.
     """
     
     def __init__(
@@ -668,23 +679,19 @@ class HybridStructuralModel(nn.Module):
 
 class CompositeStructuralModel(nn.Module):
     """
-    Robust structural model implementing the 'General Formulation' composition.
-
-    This is the DEFAULT structural model used by GSEMBackbone (structure_type='composite').
+    Gated sequential structural model.
 
     Forward pass (three sequential stages):
-        1. Static geometry:  u = (I - B_s)^{-1} xi
+        1. Static solve:     u = (I - B_s)^{-1} xi
         2. Dynamic attention: a = Attn(u)
         3. Gated fusion:     h = alpha * u + (1 - alpha) * a
 
-    Relationship to paper Eq.22:
-        Paper Eq.22 couples static and dynamic structure in a fixed point.
-        This gated sequential composition is a different architecture, not one
-        iteration of that equation. No approximation guarantee is asserted.
-        approximation_error compares outputs only when the reference converges;
-        a small observed error is not a global error or contraction bound.
-        HybridStructuralModel is the separate iterative implementation; its
-        finite iteration count does not certify an exact fixed point.
+    This is a distinct architecture from a coupled fixed-point equation.
+    It is not one iteration of Eq.22 or any approximation to it.
+    Use HybridStructuralModel for the iterative fixed-point solver.
+    approximation_error measures the output difference from a converged
+    coupled reference and raises if that reference does not converge.
+    A small observed difference is not a global bound.
     """
     def __init__(
         self,

@@ -203,7 +203,6 @@ class TabMixNN(nn.Module):
         lambda_sparse: float = 0.001,
         lambda_kl: float = 1.0,
         kl_auto_scale: bool = False,
-        lambda_dag: float = 0.0,
         lambda_contraction: float = 0.0,
         grad_clip_norm: float = 1.0,
         loss_reduction: str = "elbo",  # observed likelihood sum per row
@@ -280,7 +279,6 @@ class TabMixNN(nn.Module):
         self.lambda_sparse = lambda_sparse
         self.lambda_kl = lambda_kl
         self.kl_auto_scale = kl_auto_scale
-        self.lambda_dag = lambda_dag
         self.lambda_contraction = lambda_contraction
         self.grad_clip_norm = grad_clip_norm
         if loss_reduction not in ("elbo", "outcome_mean", "sample_weighted"):
@@ -1158,7 +1156,6 @@ class TabMixNN(nn.Module):
                      if not isinstance(v, torch.Tensor): continue
                      
                      if 'kl' in k: total_loss = total_loss + self.lambda_kl * v
-                     elif 'dag' in k: total_loss = total_loss + self.lambda_dag * v
                      elif 'contraction' in k: total_loss = total_loss + self.lambda_contraction * v
                      else: total_loss = total_loss + self.lambda_sparse * v
         
@@ -1167,13 +1164,7 @@ class TabMixNN(nn.Module):
 
         # Output SEM penalties
         if getattr(self, 'output_sem', None) is not None:
-             pen = {
-                 'dag': self.output_sem.dag_penalty(),
-                 'sparsity': self.output_sem.sparsity_penalty()
-             }
-             for k, v in pen.items():
-                 if 'dag' in k: total_loss = total_loss + self.lambda_dag * v
-                 else: total_loss = total_loss + self.lambda_sparse * v
+             total_loss = total_loss + self.lambda_sparse * self.output_sem.sparsity_penalty()
         
         # If no penalties found, return something that might require grad if we need it
         # But if total_loss is still 0.0, it's fine as long as the main NLL loss requires grad.
@@ -1332,7 +1323,7 @@ class TabMixNN(nn.Module):
                 "use_static_structure", "use_dynamic_structure", "n_attention_heads",
                 "dynamic_structure_config", "backbone_dropout", "manifold_configs", "use_recursive",
                 "aggregation", "lr", "weight_decay", "batch_size", "epochs", "device", "verbose",
-                "lambda_sparse", "lambda_kl", "kl_auto_scale", "lambda_dag", "lambda_contraction",
+                "lambda_sparse", "lambda_kl", "kl_auto_scale", "lambda_contraction",
                 "grad_clip_norm", "loss_reduction", "enforce_centering", "random_state",
                 "cov_struct_map", "scale_random_by_terms", "unknown_strategy", "output_sem_mode",
                 "output_structure", "output_structure_config", "use_identity_head")
