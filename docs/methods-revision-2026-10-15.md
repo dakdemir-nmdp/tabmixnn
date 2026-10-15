@@ -277,18 +277,40 @@ useful group-level structure within the 200-epoch budget.
 | TabMixNN benchmark protocol (seed 123)    | 109.4 | −5.13 |
 | TabMixNN benchmark protocol (seed 456)    | 104.7 | −4.61 |
 
-**Action items from this diagnosis:**
+**Action items from this diagnosis:** addressed in session 85 (see below).
 
-1. The `run_regression.py` benchmark now includes an `xgboost_nogroup` baseline
-   (added in this session). Group-holdout wins must be compared against
-   `xgboost_nogroup_rmse`, not `xgboost_rmse`.
-2. The 200-epoch benchmark protocol is not suitable for group-holdout evaluation.
-   The validated protocol (2000 epochs, full batch, lr=0.01, UN, no kl_auto_scale)
-   should be used for group-holdout runs, or the benchmark should explicitly
-   note that group-holdout results at 200 epochs are not meaningful.
-3. The group-holdout collapse is not a fundamental model failure: at the
-   validated protocol, TabMixNN matches XGBoost-nogroup on Sleepstudy.
-   The collapse is a protocol artifact.
+### Validated-protocol group-holdout results (session 85, all 5 datasets)
+
+Running the validated protocol (2000 epochs, full batch, lr=0.01, UN,
+no kl_auto_scale) across all 5 datasets confirms that the group-holdout
+collapse is a protocol artifact for most datasets. Results are means over
+seeds [42, 123, 456]. Script: `experiments/run_gh_validated.py`.
+
+| Dataset     | XGB-nogroup RMSE | TabMixNN RMSE | TabMixNN R² | Result |
+|-------------|-----------------|---------------|-------------|--------|
+| Sleepstudy  | 29.64           | 29.63         | 0.55        | WIN    |
+| ChickWeight | 42.75           | 39.23         | 0.71        | WIN    |
+| Machines    | 5.07            | 5.56          | 0.57        | loss   |
+| Oxboys      | 11.51           | 10.91         | −0.52       | WIN    |
+| Loblolly    | 1.16            | 1.71          | 0.99        | loss   |
+
+TabMixNN wins (GH, validated protocol): **3/5**.
+
+Notes:
+- Machines: only 1 held-out group (6 workers × 25% = 1.5 → 1). High variance;
+  seed 123 wins (4.97 vs 5.07), seeds 42 and 456 lose. Not a reliable signal.
+- Oxboys: both methods have negative R² on the held-out groups — the fixed
+  effect of age alone is a poor predictor for unseen subjects at new age
+  ranges. TabMixNN is marginally better (10.91 vs 11.51) but neither is useful.
+- Loblolly: XGBoost-nogroup wins cleanly (1.16 vs 1.71). The random intercept
+  for Seed captures tree-family baseline height; without group identity,
+  TabMixNN cannot recover this from age alone, and neither can XGBoost —
+  but XGBoost's nonlinear age fit is tighter on this small dataset.
+- The 200-epoch benchmark protocol collapses on all 5 datasets (GH 0/5 vs
+  XGB-nogroup). The validated protocol recovers 3/5. The remaining 2 losses
+  (Machines, Loblolly) are not protocol artifacts — they reflect genuine
+  limitations when the group effect is the dominant signal and no group
+  information is available at test time.
 
 ## Benchmark scripts and paper tables
 
