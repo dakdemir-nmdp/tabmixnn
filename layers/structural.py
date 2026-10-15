@@ -678,16 +678,13 @@ class CompositeStructuralModel(nn.Module):
         3. Gated fusion:     h = alpha * u + (1 - alpha) * a
 
     Relationship to paper Eq.22:
-        Paper Eq.22 defines a fixed-point equation h = f(h, xi) that couples static
-        and dynamic structure simultaneously. CompositeStructuralModel approximates
-        this by applying the two components sequentially (one pass), which is
-        equivalent to a single iteration of the fixed-point scheme starting from xi.
-        This is a deliberate design choice: it avoids the convergence instability of
-        the true fixed-point iteration (HybridStructuralModel) while retaining the
-        structural inductive bias. For most practical purposes the sequential
-        approximation is sufficient; use HybridStructuralModel (structure_type='iterative')
-        only when you need the exact fixed-point semantics and can tolerate the
-        convergence overhead and occasional instability.
+        Paper Eq.22 couples static and dynamic structure in a fixed point.
+        This gated sequential composition is a different architecture, not one
+        iteration of that equation. No approximation guarantee is asserted.
+        approximation_error compares outputs only when the reference converges;
+        a small observed error is not a global error or contraction bound.
+        HybridStructuralModel is the separate iterative implementation; its
+        finite iteration count does not certify an exact fixed point.
     """
     def __init__(
         self,
@@ -759,39 +756,36 @@ class CompositeStructuralModel(nn.Module):
         return p
 
     def approximation_error(self, xi: torch.Tensor, hybrid_max_iter: int = 50) -> float:
-        """
-        M3 diagnostic: measure how far the composite (sequential) approximation
-        deviates from the true fixed-point (HybridStructuralModel with many iterations).
+        """Relative output difference from a converged coupled reference.
 
-        Returns the relative error ||h_composite - h_hybrid|| / (||h_hybrid|| + 1e-8)
-        averaged over the batch. Values < 0.01 indicate the approximation is negligible.
-
-        Args:
-            xi: Input tensor [batch, dim]
-            hybrid_max_iter: Iterations for the reference fixed-point solve (default 50).
+        The ratio is nonnegative and unbounded. Raises if the reference fails
+        its relative residual tolerance; this is a local diagnostic only.
         """
+        if hybrid_max_iter < 1:
+            raise ValueError("hybrid_max_iter must be positive")
+        modes = [(module, module.training) for module in self.modules()]
         self.eval()
-        with torch.no_grad():
-            h_composite = self.forward(xi)
-
-            # Reference: run fixed-point iteration to convergence
-            eta = xi.clone()
-            for _ in range(hybrid_max_iter):
-                eta_old = eta.clone()
-                term = 0.0
-                if self.use_static:
-                    term = term + self.B_static(eta)
-                if self.use_dynamic:
-                    dyn, _ = self.B_dynamic(eta, return_weights=True)
-                    term = term + dyn
-                eta = xi + term
-                if torch.norm(eta - eta_old) < 1e-6 * (torch.norm(eta) + 1e-8):
-                    break
-            h_hybrid = eta
-
-            rel_err = (torch.norm(h_composite - h_hybrid, dim=-1) /
-                       (torch.norm(h_hybrid, dim=-1) + 1e-8))
-            return float(rel_err.mean().item())
+        try:
+            with torch.no_grad():
+                h_composite = self.forward(xi)
+                eta = xi.clone()
+                def update(value):
+                    term = torch.zeros_like(value)
+                    if self.use_static:
+                        term = term + self.B_static(value)
+                    if self.use_dynamic:
+                        term = term + self.B_dynamic(value, return_weights=True)[0]
+                    return xi + term
+                for _ in range(hybrid_max_iter):
+                    eta = update(eta)
+                    residual = torch.norm(update(eta) - eta)
+                    if torch.isfinite(residual) and residual <= 1e-6 * (torch.norm(eta) + 1e-8):
+                        rel = torch.norm(h_composite-eta, dim=-1) / (torch.norm(eta, dim=-1)+1e-8)
+                        return float(rel.mean())
+                raise RuntimeError("Coupled reference did not converge; approximation error is unavailable")
+        finally:
+            for module, mode in modes:
+                module.training = mode
 
 
 class RandomEffectsModule(nn.Module):

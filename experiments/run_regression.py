@@ -1,5 +1,5 @@
 """
-Regression benchmark — reproduces Tables 2-3 from arXiv:2512.23787.
+Regression benchmark — exploratory subset, not a reproduction of Tables 2-3 from arXiv:2512.23787.
 
 Datasets: Sleepstudy, ChickWeight, Machines, Oxboys, Loblolly
 Metrics:  RMSE, R²

@@ -120,7 +120,7 @@ class Binomial(Family):
     def nll(self, theta, y, **kwargs):
         # theta is logits
         # y is 0/1
-        return F.binary_cross_entropy_with_logits(theta.squeeze(-1), y.float().squeeze(), reduction='mean')
+        return F.binary_cross_entropy_with_logits(theta.reshape(-1), y.float().reshape(-1), reduction='mean')
 
     def predict(self, theta, mode="default", **kwargs):
         probs = torch.sigmoid(theta)
@@ -149,7 +149,7 @@ class Poisson(Family):
 
     def nll(self, theta, y, **kwargs):
         # theta is log_rate
-        return F.poisson_nll_loss(theta, y.float().squeeze(), log_input=True, reduction='mean')
+        return -torch.distributions.Poisson(theta.reshape(-1).exp()).log_prob(y.reshape(-1)).mean()
 
     def predict(self, theta, mode="default", **kwargs):
         return torch.exp(theta).cpu().numpy()
@@ -188,31 +188,11 @@ class NegBinomial(Family):
         mu = torch.exp(log_mu) + EPSILON
         alpha = torch.exp(log_alpha) + EPSILON
 
-        # NB2: r = 1/alpha, p = r/(r+mu)
-        r = 1.0 / alpha
-        p = r / (r + mu)
-        # Guard against boundary probs
-        p = torch.clamp(p, min=EPSILON, max=1.0 - EPSILON)
-
-        try:
-            dist = torch.distributions.NegativeBinomial(total_count=r, probs=p)
-            nll = -dist.log_prob(y.squeeze()).mean()
-        except Exception as e:
-            self.logger.warning(
-                f"NegativeBinomial log_prob failed ({e}); returning large penalty."
-            )
-            return torch.tensor(LARGE_PENALTY, device=log_mu.device, dtype=log_mu.dtype)
-
-        # ERROR RECOVERY: Return large penalty instead of crashing
-        if torch.isnan(nll) or torch.isinf(nll):
-            self.logger.warning(
-                f"NegativeBinomial NLL is invalid ({nll.item():.2e}). "
-                f"log_mu range: [{log_mu.min().item():.2f}, {log_mu.max().item():.2f}], "
-                f"log_alpha range: [{log_alpha.min().item():.2f}, {log_alpha.max().item():.2f}]. "
-                f"Returning large penalty to continue training."
-            )
-            return torch.tensor(LARGE_PENALTY, device=nll.device, dtype=nll.dtype)
-        return nll
+        # PyTorch counts successes before r failures: mean = r*exp(logits).
+        # NB2 therefore has r=1/alpha and logits=log(mu*alpha).
+        dist = torch.distributions.NegativeBinomial(
+            total_count=torch.exp(-log_alpha), logits=log_mu + log_alpha)
+        return -dist.log_prob(y.reshape(-1)).mean()
 
     def predict(self, theta, mode="default", **kwargs):
         if isinstance(theta, (tuple, list)):
@@ -616,7 +596,7 @@ class MultiLabelBinomial(Family):
     def nll(self, theta, y, **kwargs):
         # theta are logits: [batch, n_labels]
         # y: [batch, n_labels]
-        return F.binary_cross_entropy_with_logits(theta, y.float(), reduction='mean')
+        return F.binary_cross_entropy_with_logits(theta, y.float(), reduction='none').sum(dim=-1).mean()
 
     def predict(self, theta, mode="default", **kwargs):
         probs = torch.sigmoid(theta)

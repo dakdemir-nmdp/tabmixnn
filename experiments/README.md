@@ -1,6 +1,19 @@
 # TabMixNN Benchmark Experiments
 
-Reproduces Tables 2-4 from arXiv:2512.23787 using 5-fold cross-validation.
+Exploratory benchmark scripts. These do **not** reproduce Tables 2–4 of
+arXiv:2512.23787: the dataset set and protocols differ, and original run artifacts
+are unavailable. See `../docs/methods-audit-2026-10-15.md`.
+
+For the validated methods check (train-only preprocessing, matched splits,
+independent mixed-model reference, three seeds):
+
+```bash
+uv pip install --python .venv/bin/python statsmodels scipy
+.venv/bin/python experiments/validate_sleepstudy.py
+```
+
+Aggregate results are in `results/methods_sleepstudy.json`. This is a focused
+Sleepstudy validation, not evidence of performance across the full benchmark suite.
 
 ## Setup
 

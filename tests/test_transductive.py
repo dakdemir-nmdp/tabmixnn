@@ -24,9 +24,9 @@ def _make_sleepstudy_like(n_groups=18, n_per_group=10, seed=42):
 
 def test_adapt_unseen_groups_improves_r2():
     """
-    Group-holdout: unseen groups should get R² > prior-mean fallback after E-step.
+    Group-holdout: unseen groups should get R² > prior-mean fallback after conditional MAP adaptation.
     Uses embedding_dim=8 + hidden=[16] so the backbone learns a useful representation
-    that the E-step can exploit (pure LMM with emb=1 has limited headroom).
+    that the conditional MAP adaptation can exploit (pure LMM with emb=1 has limited headroom).
     """
     df = _make_sleepstudy_like(n_groups=18, n_per_group=10)
     train_groups = list(range(12))
@@ -43,10 +43,13 @@ def test_adapt_unseen_groups_improves_r2():
         epochs=500,
         lr=0.05,
         kl_auto_scale=True,
+        random_state=42,
         verbose=False,
     )
     model.fit(train_df)
 
+    support_df = test_df[test_df.Days < 5].copy()
+    test_df = test_df[test_df.Days >= 5].copy()
     y_true = test_df["Reaction"].values
     ss_tot = np.var(y_true) * len(y_true)
 
@@ -54,11 +57,11 @@ def test_adapt_unseen_groups_improves_r2():
     y_prior = model.predict(test_df)
     r2_prior = 1 - np.sum((y_true - y_prior) ** 2) / ss_tot
 
-    # Transductive E-step
-    y_transductive = model.predict_transductive(test_df, n_steps=100, lr=0.05)
+    # Transductive conditional MAP adaptation
+    y_transductive = model.predict_transductive(test_df, support_df=support_df, n_steps=300, lr=0.05)
     r2_transductive = 1 - np.sum((y_true - y_transductive) ** 2) / ss_tot
 
-    # E-step must strictly improve R²
+    # conditional MAP adaptation must strictly improve R²
     assert r2_transductive > r2_prior, (
         f"Transductive R²={r2_transductive:.3f} should exceed prior-mean R²={r2_prior:.3f}"
     )
@@ -81,12 +84,13 @@ def test_adapt_unseen_groups_seen_groups_unchanged():
         epochs=100,
         lr=0.05,
         kl_auto_scale=True,
+        random_state=42,
         verbose=False,
     )
     model.fit(df)
 
     y_standard = model.predict(df)
-    y_transductive = model.predict_transductive(df, n_steps=10)
+    y_transductive = model.predict_transductive(df, support_df=df, n_steps=10)
 
     # All groups are seen — transductive should not change predictions
     np.testing.assert_allclose(y_standard, y_transductive, rtol=1e-4,
@@ -107,6 +111,7 @@ def test_adapt_unseen_groups_returns_override_dict():
         epochs=50,
         lr=0.05,
         kl_auto_scale=True,
+        random_state=42,
         verbose=False,
     )
     model.fit(train_df)

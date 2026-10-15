@@ -1,5 +1,5 @@
 """
-Classification benchmark — reproduces Table 4 from arXiv:2512.23787.
+Classification benchmark — exploratory subset, not a reproduction of Table 4 from arXiv:2512.23787.
 
 Datasets: Aids2, Males, VerbAgg, Train
 Metrics:  AUC, Accuracy

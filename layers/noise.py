@@ -250,7 +250,7 @@ class SPDEKernel(nn.Module):
         
         Uses precision-based sampling for efficiency:
         1. Sample z ~ N(0, I)
-        2. Solve Qε = z for ε
+        2. Solve chol(Q).T ε = z for ε
         """
         if device is None:
             device = self.L.device
@@ -264,11 +264,8 @@ class SPDEKernel(nn.Module):
         # Q is symmetric positive definite, use Cholesky
         try:
             L_chol = torch.linalg.cholesky(Q)
-            # Solve L L^T ε = z
-            # First solve L y = z
-            y = torch.linalg.solve_triangular(L_chol, z.T, upper=False)
-            # Then solve L^T ε = y
-            epsilon = torch.linalg.solve_triangular(L_chol.T, y, upper=True)
+            # One triangular solve: Cov(L^-T z) = Q^-1.
+            epsilon = torch.linalg.solve_triangular(L_chol.T, z.T, upper=True)
             epsilon = epsilon.T
         except RuntimeError:
             # Fallback: direct inverse (slower but more stable)
@@ -381,8 +378,7 @@ class KroneckerSPDEKernel(nn.Module):
             
             Q_i = L_base + (kappa ** 2) * I
             
-            if self.alpha == 2:
-                Q_i = torch.matmul(Q_i, Q_i)
+            Q_i = torch.linalg.matrix_power(Q_i, self.alpha)
             
             # Distribute tau equally across dimensions (geometric mean)
             # Or just apply to final result. Let's apply to final result for simplicity.
@@ -475,11 +471,10 @@ def create_spde_kernel(grid_shape, use_kronecker=True, **kwargs):
     
     grid_shape = tuple(grid_shape)
     
-    # Use Kronecker if ND (>1D) and requested
-    if use_kronecker and len(grid_shape) > 0:
+    if use_kronecker:
         return KroneckerSPDEKernel(grid_shape, **kwargs)
-    else:
-        # Fallback to potentially expensive generic SPDE if user explicitly disabled kronecker?
-        # But generic SPDE currently only supports 2D tuple.
-        # Let's default to Kronecker for any ND > 2D.
-        return KroneckerSPDEKernel(grid_shape, **kwargs)
+    if len(grid_shape) == 1:
+        grid_shape = (grid_shape[0], 1)
+    if len(grid_shape) != 2:
+        raise ValueError("Dense SPDE supports one- or two-dimensional grids")
+    return SPDEKernel(grid_shape, **kwargs)

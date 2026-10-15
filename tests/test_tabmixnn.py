@@ -96,18 +96,10 @@ class TestFormulaParser:
         design = CompiledDesign("y ~ x", outcomes, "none", None)
         design.fit(df)
         X, Z_ind, Z_slopes, Ys = design.transform(df, mode="fit")
-        # The design uses encoder bias for intercept (not an explicit column).
-        # So 'y ~ x' produces X with 1 column (just x), not 2.
-        # This is a deliberate design choice: intercept_included=False always.
-        assert X.shape == (len(df), 1), f"Expected (n, 1) for x-only design, got {X.shape}"
+        assert X.shape == (len(df), 2)
+        np.testing.assert_allclose(X[:, 0], 1)
         assert len(Z_ind) == 0
-        # Document the known limitation: no way to get explicit intercept column
-        # via formula — it always comes from encoder bias.
-        assert design.intercept_included is False, (
-            "intercept_included is hardcoded False — intercept comes from encoder bias. "
-            "This means fixed_effects in extract_parameters() will never show an intercept "
-            "in outcome units. Known interpretability gap."
-        )
+        assert design.intercept_included is True
 
     def test_random_intercept(self):
         from tabmixnn.parsing.formula import CompiledDesign, OutcomeSpec
@@ -886,14 +878,10 @@ class TestCovarianceStructures:
         enc = model.encoder
         tid = "term_0"
         assert tid in enc.variational_params, "term_0 not in variational_params"
-        mu = enc.variational_params[tid][0].detach().numpy()  # [n_levels+1, emb]
-        mu_valid = mu[1:]  # skip index 0 (unknown level)
-        mean_across_levels = np.abs(mu_valid.mean(axis=0))
-        std_across_levels = mu_valid.std(axis=0) + 1e-8
-        ratio = mean_across_levels / std_across_levels
-        assert ratio.mean() < 0.5, (
-            f"enforce_centering=True: mean/std ratio={ratio.mean():.3f} (expected < 0.5)"
-        )
+        mu = enc.variational_params[tid][0]
+        effects = enc.random_effects_values(tid, mu).detach().numpy()
+        np.testing.assert_allclose(effects.mean(axis=0), 0, atol=1e-6)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1094,7 +1082,7 @@ class TestOptimizerParameterGroups:
 # ---------------------------------------------------------------------------
 
 class TestApproximationError:
-    """CompositeStructuralModel.approximation_error() returns float in [0, 1]."""
+    """CompositeStructuralModel.approximation_error() returns a finite nonnegative relative error."""
 
     def test_approximation_error_range(self):
         import torch
@@ -1137,4 +1125,4 @@ class TestApproximationError:
         xi = torch.randn(16, 32)
         err = composite.approximation_error(xi)
         assert isinstance(err, float), f"approximation_error() should return float, got {type(err)}"
-        assert 0.0 <= err <= 1.0, f"approximation_error()={err:.4f} not in [0, 1]"
+        assert np.isfinite(err) and err >= 0.0, f"approximation_error()={err:.4f} not in [0, 1]"

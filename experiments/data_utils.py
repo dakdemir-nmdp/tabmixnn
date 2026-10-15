@@ -30,7 +30,7 @@ def load(name: str) -> pd.DataFrame:
     path = DATA_DIR / f"{key}.csv"
     if not path.exists():
         print(f"Downloading {key}...")
-        r = requests.get(_URLS[key], verify=False, timeout=30)
+        r = requests.get(_URLS[key], timeout=30)
         r.raise_for_status()
         path.write_bytes(r.content)
     df = pd.read_csv(path)

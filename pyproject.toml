@@ -26,8 +26,8 @@ examples = [
 ]
 lifelines = ["lifelines"]
 
-[tool.setuptools.packages]
-find = {where = [".."], include = ["tabmixnn*"]}
+[tool.setuptools]
+packages = ["tabmixnn", "tabmixnn.core", "tabmixnn.covariance", "tabmixnn.layers", "tabmixnn.backbones", "tabmixnn.parsing", "tabmixnn.utils"]
 
 [tool.setuptools.package-dir]
-"" = ".."
+tabmixnn = "."

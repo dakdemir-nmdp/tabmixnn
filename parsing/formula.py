@@ -123,7 +123,7 @@ class CompiledDesign:
         # A standalone "1" indicates an intercept and should not be treated as a column
         fixed_terms = [t for t in fixed_terms if t != '1']
         # Legacy default: handle intercept via bias, not explicit column
-        self.intercept_included = False
+        self.intercept_included = intercept
             
         # Parse random terms
         random_terms_spec = []
@@ -198,8 +198,7 @@ class CompiledDesign:
         return df_clean
 
     def _fit_fixed(self, df, fixed_part):
-        # Legacy behavior: rely on model bias, not explicit intercept column
-        self.intercept_included = False
+        self.intercept_included = fixed_part["intercept"]
         rhs = self._build_fixed_formula(fixed_part)
         self.fixed_formula = f"~ {rhs}"
 
@@ -229,6 +228,10 @@ class CompiledDesign:
 
     def export_state(self) -> Dict[str, Any]:
         """Export a picklable snapshot of the design (avoids patsy objects)."""
+        if self.design_info is not None and any(
+            info.state.get("transforms") for info in self.design_info.factor_infos.values()
+        ):
+            raise NotImplementedError("Saving stateful Patsy transforms is unsupported; preprocess explicitly using training-only parameters")
         return {
             "formula": self.formula,
             "outcomes": self.outcomes,
@@ -259,10 +262,7 @@ class CompiledDesign:
             cat = pd.Categorical([levels_list[0]], categories=levels_list)
             data[col] = cat
 
-        if not data:
-            return
-
-        df_dummy = pd.DataFrame(data)
+        df_dummy = pd.DataFrame(data) if data else pd.DataFrame(index=[0])
         design_mat = dmatrix(self.fixed_formula, df_dummy, return_type="dataframe")
         self.design_info = design_mat.design_info
         self.fixed_feature_names = list(self.design_info.column_names)
@@ -298,12 +298,19 @@ class CompiledDesign:
             maybe_cov = self.cov_struct_map.get(group, {})
             use_k_levels = False
             if isinstance(maybe_cov, dict):
-                use_k_levels = maybe_cov.get("type") == "K" and "levels" in maybe_cov
+                use_k_levels = maybe_cov.get("type", "").upper() in ("K", "KRON", "GP") and "levels" in maybe_cov
 
             if use_k_levels:
                 levels_list = list(maybe_cov["levels"])
                 mapping = {val: i+1 for i, val in enumerate(levels_list)}
-                train_levels = maybe_cov.get("train_levels", levels_list)
+                if len(set(levels_list)) != len(levels_list):
+                    raise ValueError(f"Duplicate covariance levels for {group}.")
+                observed = set(df[group].dropna().unique())
+                if not observed.issubset(set(levels_list)):
+                    raise ValueError(f"Training groups missing from covariance levels for {group}.")
+                train_levels = list(maybe_cov.get("train_levels", [x for x in levels_list if x in observed]))
+                if len(set(train_levels)) != len(train_levels) or set(train_levels) != observed:
+                    raise ValueError(f"train_levels must contain exactly the observed training groups for {group}.")
             else:
                 uniques = df[group].dropna().unique()
                 mapping = {val: i+1 for i, val in enumerate(uniques)}
@@ -357,7 +364,6 @@ class CompiledDesign:
                     # Assume numeric slope for now
                     mu, sigma = term.slope_stats.get(s, (0.0, 1.0))
                     vals = df[s].fillna(mu)
-                    vals = (vals - mu) / sigma
                     slope_vals.append(vals.values)
             
             slope_mat = np.stack(slope_vals, axis=1).astype(np.float32)
@@ -392,9 +398,9 @@ class CompiledDesign:
         Uses searchsorted with right-closed intervals and clips out-of-range times.
         """
         tb = np.asarray(time_bins)
-        idx = np.searchsorted(tb, time_array, side="right")
+        idx = np.searchsorted(tb, time_array, side="left")
         idx = np.clip(idx, 0, len(tb) - 1)
-        return idx.astype(np.int64)
+        return np.where(pd.isna(time_array), np.nan, idx).astype(np.float32)
 
     def save(self, path):
         with open(path, 'wb') as f:
