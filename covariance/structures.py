@@ -63,11 +63,18 @@ class IIDCovariance(CovarianceStructure):
 
 class ARMACovariance(CovarianceStructure):
     """
-    ARMA(p, q) along the level dimension for each slope independently.
-    Supports p >= 0, q >= 0 (recommended small: p<=2, q<=2). If p=1,q=0 this reduces to AR(1).
+    Finite-start ARMA(p, q), independently for each slope.
+
+    AR coefficients are built from bounded partial autocorrelations, ensuring
+    a stable AR polynomial in exact arithmetic. Pre-sample states are zero:
+    this is NOT the stationary-initialized covariance of AR1Covariance.
+    MA coefficients are bounded directly; invertibility is not imposed.
     """
     def __init__(self, n_levels, n_slopes, p=1, q=0):
         super().__init__(n_levels, n_slopes)
+        if any(isinstance(order, bool) or not isinstance(order, (int, np.integer)) or order < 0
+               for order in (p, q)):
+            raise ValueError("ARMA orders p and q must be nonnegative integers")
         self.p = p
         self.q = q
         self.log_sigma = nn.Parameter(torch.zeros(n_slopes, 1))
@@ -80,10 +87,27 @@ class ARMACovariance(CovarianceStructure):
         else:
             self.register_parameter("theta_raw", None)
 
+    @staticmethod
+    def _ar_from_partial_correlations(raw):
+        """Levinson recursion with phi[k,j]=phi[k-1,j]-kappa[k]*phi[k-1,k-j]."""
+        partial = torch.tanh(raw).clamp(-1 + 1e-6, 1 - 1e-6)
+        coefficients = partial[:1]
+        for k in range(1, raw.shape[0]):
+            coefficients = torch.cat([
+                coefficients - partial[k:k+1] * coefficients.flip(0),
+                partial[k:k+1],
+            ], dim=0)
+        return coefficients
+
+    @property
+    def ar_coefficients(self):
+        return (self._ar_from_partial_correlations(self.phi_raw)
+                if self.phi_raw is not None else None)
+
     def forward(self, v):
         # v: [n_levels, n_slopes, emb]
         sigma = torch.exp(self.log_sigma).unsqueeze(0)  # [1, n_slopes, 1]
-        phi = torch.tanh(self.phi_raw) if self.phi_raw is not None else None
+        phi = self.ar_coefficients
         theta = torch.tanh(self.theta_raw) if self.theta_raw is not None else None
 
         # Initialize buffers for previous u and eps

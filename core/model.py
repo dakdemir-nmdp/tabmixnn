@@ -1,4 +1,5 @@
 
+import copy
 import warnings
 import torch
 import torch.nn as nn
@@ -237,6 +238,15 @@ class TabMixNN(nn.Module):
                         o.y = o.name
                 self.outcomes.append(o)
             self.single_outcome_family = None
+
+        # Keep constructor family states so repeated fit() calls start afresh.
+        initial_families = ({'main': self.single_outcome_family}
+                            if self.single_outcome_family is not None
+                            else {o.name: o.family for o in self.outcomes})
+        self._initial_family_states = {
+            name: copy.deepcopy(family.state_dict())
+            for name, family in initial_families.items()
+        }
             
         self.embedding_dim = embedding_dim
         self.cov_struct_map = cov_struct_map or cov_struct or {}
@@ -372,7 +382,11 @@ class TabMixNN(nn.Module):
             callbacks: Optional[list] = None,
             reuse_design=None,
             **kwargs):
-        """Fit model to dataframe; training overrides are explicit and validated."""
+        """Fit from scratch, including preprocessing, weights, and optimizer.
+
+        ``reuse_design`` explicitly reuses preprocessing only; it does not
+        warm-start parameters. Training overrides apply to the new optimizer.
+        """
         if "learning_rate" in kwargs:
             if "lr" in kwargs:
                 raise ValueError("Pass only lr, not both lr and learning_rate")
@@ -395,10 +409,18 @@ class TabMixNN(nn.Module):
         # Handle Validation Split
         train_df = df
         if val_df is None and val_fraction > 0.0:
-            val_df = df.sample(frac=val_fraction, random_state=self.random_state if self.random_state is not None else 42)
-            train_df = df.drop(val_df.index).reset_index(drop=True)
+            # Split by row position: dataframe index labels need not be unique.
+            positions = pd.Series(np.arange(len(df)))
+            val_positions = positions.sample(frac=val_fraction, random_state=self.random_state if self.random_state is not None else 42).to_numpy()
+            train_mask = np.ones(len(df), dtype=bool)
+            train_mask[val_positions] = False
+            train_df = df.iloc[train_mask].reset_index(drop=True)
+            val_df = df.iloc[val_positions]
             val_df = val_df.reset_index(drop=True)
             self.logger.info(f"Split data: {len(train_df)} train, {len(val_df)} validation")
+
+        if len(train_df) == 0 or (val_df is not None and len(val_df) == 0):
+            raise ValueError("Training and requested validation partitions must be nonempty")
 
         self._train_data = train_df.copy()
         if early_stopping and val_df is None:
@@ -415,8 +437,7 @@ class TabMixNN(nn.Module):
                 raise ValueError("Formula must include LHS 'y ~ ...' for single outcome shortcut.")
 
         # 2. Compile Design
-        if reuse_design is not None:
-             self.design = reuse_design
+        self.design = reuse_design
         if self.design is None:
             self.logger.info("Compiling design...")
             self.design = CompiledDesign(
@@ -451,13 +472,12 @@ class TabMixNN(nn.Module):
                 self.logger.info(f"kl_auto_scale: λ_KL set to {self.lambda_kl:.5f} (1/mean_group_size={np.mean(group_sizes):.1f})")
 
         # 4. Initialize Modules
-        required_fixed_dim = X.shape[1]
-        # Rebuild if encoder is missing or input dims don't match the design
-        if self.encoder is None or getattr(self.encoder, "fixed_linear", None) is None or self.encoder.fixed_linear.in_features != required_fixed_dim:
-            if self.encoder is not None and self.verbose:
-                self.logger.info(f"Rebuilding model for fixed input dim {required_fixed_dim} (was {self.encoder.fixed_linear.in_features}).")
-            self._build_model(fixed_input_dim=X.shape[1], compiled_design=self.design)
-            self.to(self.device)
+        for outcome in self.outcomes:
+            outcome.family.load_state_dict(self._initial_family_states[outcome.name])
+        self._build_model(fixed_input_dim=X.shape[1], compiled_design=self.design)
+        self.to(self.device)
+        self.history = []
+        self.val_history = []
             
         # 5. Prepare Tensors
         train_data = TabMixDataset(X, Z_ind, Z_slopes, Ys)
@@ -466,38 +486,21 @@ class TabMixNN(nn.Module):
             Xv, Zv_ind, Zv_slopes, Yv = self.design.transform(val_df, mode='fit')
             val_data = TabMixDataset(Xv, Zv_ind, Zv_slopes, Yv)
 
-        # Initialize Gaussian residual scale to match data variance for faster convergence
-        try:
-            if hasattr(self, "families") and isinstance(self.families, nn.ModuleDict):
-                for name, family in self.families.items():
-                    if isinstance(family, Gaussian):
-                        if name in Ys and Ys[name].size > 0:
-                            y_np = Ys[name]
-                            if isinstance(y_np, torch.Tensor):
-                                y_arr = y_np.detach().cpu().numpy()
-                            else:
-                                y_arr = np.asarray(y_np)
-                            y_std = float(np.nanstd(y_arr))
-                            y_mean = float(np.nanmean(y_arr))
-                            
-                            # Init sigma
-                            if y_std > 0:
-                                sigma_init = max(y_std, 1e-3)
-                                family.log_sigma.data = torch.log(torch.tensor(sigma_init, device=self.device))
-                                
-                            # Init fixed bias to mean if available (helps identifiability)
-                            if self.use_identity_head and self.encoder is not None and hasattr(self.encoder, "fixed_linear"):
-                                if hasattr(self.encoder.fixed_linear, "bias") and self.encoder.fixed_linear.bias is not None:
-                                    # Only if bias is close to zero (not pretrained)
-                                    # Relaxed threshold to 2.0 to catch random initialization (Uniform(-1, 1) for dim 1)
-                                    if torch.abs(self.encoder.fixed_linear.bias).mean() < 2.0:
-                                        self.encoder.fixed_linear.bias.data.fill_(y_mean / (len(self.outcomes) if self.outcomes else 1))
-                                        if self.verbose:
-                                            self.logger.info(f"Initialized fixed intercept to {y_mean:.2f}")
-
-        except Exception as e:
-            if self.verbose: self.logger.warning(f"Init failed: {e}")
-            pass
+        # Initialize on observed training targets only. The explicit design
+        # intercept makes the old fixed_linear.bias initialization unreachable;
+        # nonlinear models need their actual output bias initialized instead.
+        with torch.no_grad():
+            for name, family in self.families.items():
+                if not isinstance(family, Gaussian):
+                    continue
+                observed = np.asarray(Ys[name])
+                observed = observed[np.isfinite(observed)]
+                if not observed.size:
+                    continue
+                family.log_sigma.fill_(np.log(max(float(observed.std()), 1e-3)))
+                head = self.heads[name]
+                if isinstance(head, nn.Linear) and head.bias is not None and self.output_sem is None:
+                    head.bias.fill_(float(observed.mean()))
         
         if (self.use_identity_head and not self.hidden_dims and len(self.outcomes) == 1
                 and isinstance(self.data_family(self.outcomes[0].name), Gaussian)):
@@ -859,6 +862,9 @@ class TabMixNN(nn.Module):
             if hasattr(self.encoder, 'unknown_params'):
                 for p in self.encoder.unknown_params.parameters():
                     re_param_ids.add(id(p))
+        # Biases and normalization scales should not be shrunk toward zero;
+        # penalizing the output bias makes training depend on response origin.
+        re_param_ids.update(id(p) for p in self.parameters() if p.ndim <= 1)
         # Global observation-family scale parameters are likelihood parameters.
         re_param_ids.update(id(p) for p in self.families.parameters())
         re_params = [p for p in self.parameters() if id(p) in re_param_ids]
@@ -1345,13 +1351,14 @@ class TabMixNN(nn.Module):
             path: Path to save the model (typically .pt or .pth)
         """
         checkpoint = {
-            'format_version': 2,
+            'format_version': 3,
             'state_dict': {k: v for k, v in self.state_dict().items()
                            if not k.startswith(('single_outcome_family.', 'family.'))},
             'params': self.get_params(),
             'design_state': self.design.export_state() if self.design else None,
             'history': self.history,
             'val_history': self.val_history,
+            'initial_family_states': self._initial_family_states,
         }
         torch.save(checkpoint, path)
         self.logger.info(f"Model saved to {path}")
@@ -1368,9 +1375,13 @@ class TabMixNN(nn.Module):
             Loaded TabMixNN model
         """
         checkpoint = torch.load(path, map_location=device or 'cpu', weights_only=False)
-        if checkpoint.get('format_version') != 2:
+        if checkpoint.get('format_version') not in (2, 3):
             raise ValueError("Legacy checkpoint uses pre-revision covariance/indexing semantics; refit with this version.")
         params = checkpoint['params']
+        if checkpoint['format_version'] == 2:
+            for spec in (params.get('cov_struct_map') or {}).values():
+                if spec.get('type', 'IID').upper() in ('AR', 'ARMA') and spec.get('p', 1) > 1:
+                    raise ValueError("Legacy AR(p>1) checkpoint uses direct AR coefficients; refit with the stable partial-correlation parameterization.")
         
         # Create new instance with saved params
         if device:
@@ -1381,6 +1392,8 @@ class TabMixNN(nn.Module):
             del params['family']
             
         model = cls(**params)
+        if 'initial_family_states' in checkpoint:
+            model._initial_family_states = checkpoint['initial_family_states']
         
         # Restore design and rebuild model
         design_state = checkpoint.get('design_state')

@@ -110,8 +110,8 @@ class MixedEffectsRepresentation(nn.Module):
                 self.cov_modules[tid] = AR1Covariance(n_levels, n_slopes)
 
             elif ctype in ["AR", "ARMA"]:
-                p = int(cargs.get("p", 1))
-                q = int(cargs.get("q", 0))
+                p = cargs.get("p", 1)
+                q = cargs.get("q", 0)
                 self.variational_params[tid] = nn.ParameterList([
                     nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
                     nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
@@ -278,10 +278,11 @@ class MixedEffectsRepresentation(nn.Module):
         """
         Returns a dict of term_id -> {sigmas, rho (if AR1), type}.
 
-        sigmas always contains the MARGINAL standard deviation of the random effect
-        in the embedding space, not the innovation std:
+        Scales are in embedding space. For finite-start ARMA, sigmas is the
+        innovation scale (marked by scale_kind), not a marginal scale:
           - IID/K/GP: sigma (already marginal)
-          - AR1/ARMA: sigma / sqrt(1 - rho^2)  (stationary marginal std)
+          - AR1: sigma / sqrt(1 - rho^2) (stationary marginal std)
+          - ARMA: innovation sigma; marginal scales vary with level
           - Kronecker: sqrt(diag(L_slope @ L_slope.T))
         """
         summary = {}
@@ -298,11 +299,14 @@ class MixedEffectsRepresentation(nn.Module):
                 vals['innovation_sigma'] = sigma.numpy().flatten()
 
             elif isinstance(mod, ARMACovariance):
-                # For ARMA, report innovation sigma; marginal variance is complex
+                # Finite-start ARMA has level-dependent marginal variances.
                 sigma = torch.exp(mod.log_sigma).detach().cpu().numpy().flatten()
                 vals['sigmas'] = sigma
+                vals['innovation_sigma'] = sigma
+                vals['scale_kind'] = 'innovation'
+                vals['initialization'] = 'zero_presample'
                 if mod.phi_raw is not None:
-                    phi = torch.tanh(mod.phi_raw).detach().cpu().numpy()
+                    phi = mod.ar_coefficients.detach().cpu().numpy()
                     vals['phi'] = phi
 
             elif isinstance(mod, UnstructuredSlopeCovariance):

@@ -72,10 +72,12 @@ the implementation does not add the conditional residual covariance for those
 levels. It must not be described as a full predictive distribution or an exact
 BLUP when the fitted mean is variational and the downstream response is nonlinear.
 
-Compound-symmetry correlations lie between -1/(G-1) and 1 for G > 1. General
-ARMA coefficients still describe a finite-start recurrence; independent tanh
-constraints do not establish stationary AR(p) models for p > 1. Stationary
-ARMA inference is outside the validated scope of this revision.
+Compound-symmetry correlations lie between -1/(G-1) and 1 for G > 1. Session 86
+replaces independent AR coefficient bounds with a partial-correlation recursion
+that defines a stable AR polynomial. ARMA still uses zero pre-sample states;
+stationary-initialized ARMA inference remains outside the validated scope.
+See [package repairs](package-improvements-2026-10-15.md) for numerical checks
+and checkpoint compatibility.
 
 For dense SPDE noise with precision Q = LL^T, draws are L^-T z, z ~ N(0,I),
 which have covariance Q^-1. The separable Kronecker construction is a different
@@ -244,7 +246,8 @@ Group-holdout vs XGB+group: 0/5. Group-holdout vs XGB-nogroup: 1/5 (Loblolly).
 The Sleepstudy group-holdout collapse (obs RMSE 30.9 → group-holdout RMSE
 115.8) was diagnosed on 2026-10-15 using `experiments/diagnose_sleepstudy_gh.py`.
 
-Two causes were confirmed:
+The comparison identified a baseline mismatch and sensitivity to the combined
+training recipe. It did not isolate the causal effects of individual settings:
 
 **Cause 1 — XGBoost baseline uses the group column (unfair comparison).**
 XGBoost with the Subject column cannot generalise to unseen groups: it encodes
@@ -255,14 +258,15 @@ The benchmark's `tabmixnn_wins_gh_rmse` column compared TabMixNN group-holdout
 to XGBoost obs-CV RMSE (34.4), which is not a valid comparison. The correct
 baseline for group-holdout is XGBoost without the group column.
 
-**Cause 2 — 200-epoch / kl_auto_scale protocol is too weak for unseen-group
-generalisation.** At the validated protocol (2000 epochs, full batch, lr=0.01,
+**Protocol sensitivity.** At the validated protocol (2000 epochs, full batch, lr=0.01,
 UN covariance, no kl_auto_scale), TabMixNN group-holdout RMSE is 29.1–30.1
 across three seeds, matching XGBoost-nogroup (29.6). At the benchmark protocol
 (200 epochs, kl_auto_scale), RMSE is 104–116 across three seeds — a 3–4×
-collapse. The kl_auto_scale heuristic (λ_KL = 1/mean_group_size = 0.1) over-
-damps the KL on the 14-group training set, preventing the model from learning
-useful group-level structure within the 200-epoch budget.
+collapse. The kl_auto_scale heuristic uses λ_KL = 1/mean_group_size = 0.1 on
+the 14-group training set, but this comparison also changes learning rate,
+batch size, covariance, and epochs. It does not establish that KL damping
+caused the collapse. Session 86 additionally identifies a package-level
+Gaussian initialization defect and reports results after correcting it.
 
 **Summary of diagnosis results (Sleepstudy group-holdout, 4 held-out groups):**
 
@@ -280,6 +284,10 @@ useful group-level structure within the 200-epoch budget.
 **Action items from this diagnosis:** addressed in session 85 (see below).
 
 ### Validated-protocol group-holdout results (session 85, all 5 datasets)
+
+Historical results before the session-86 package repairs. The later
+[paired diagnostics](package-improvements-2026-10-15.md) update these results
+and qualify the original causal interpretation.
 
 Running the validated protocol (2000 epochs, full batch, lr=0.01, UN,
 no kl_auto_scale) across all 5 datasets confirms that the group-holdout
@@ -306,11 +314,12 @@ Notes:
   for Seed captures tree-family baseline height; without group identity,
   TabMixNN cannot recover this from age alone, and neither can XGBoost —
   but XGBoost's nonlinear age fit is tighter on this small dataset.
-- The 200-epoch benchmark protocol collapses on all 5 datasets (GH 0/5 vs
-  XGB-nogroup). The validated protocol recovers 3/5. The remaining 2 losses
-  (Machines, Loblolly) are not protocol artifacts — they reflect genuine
-  limitations when the group effect is the dominant signal and no group
-  information is available at test time.
+- The earlier runs changed epochs, batch size, learning rate, covariance, and
+  KL weighting together, so they do not isolate which setting caused the
+  differences. Session 86 improves Machines and Loblolly with package-level
+  initialization and regularization repairs; the prior claim that their losses
+  established inherent limitations is withdrawn. Loblolly still loses on this
+  split, and its exact cause remains unresolved.
 
 ## Benchmark scripts and paper tables
 
