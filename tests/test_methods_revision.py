@@ -391,3 +391,32 @@ def test_lambda_dag_removed_from_model():
     assert 'lambda_dag' not in sig.parameters
     m = TabMixNN.lmm('y ~ x', epochs=1, verbose=False)
     assert not hasattr(m, 'lambda_dag')
+
+
+def test_methods_revision_contains_no_reml_equivalence_claim():
+    """
+    The methods revision doc must not contain phrases that assert or imply
+    REML equivalence.  Permitted: explaining what REML is and why this
+    implementation differs.  Forbidden: any claim that VI recovers, equals,
+    approximates, or is equivalent to REML.
+    """
+    import pathlib, re
+    doc = pathlib.Path(__file__).parent.parent / 'docs' / 'methods-revision-2026-10-15.md'
+    text = doc.read_text().lower()
+    # Strip lines that enumerate claims to remove (they list forbidden phrases
+    # as targets, not assertions).
+    lines = [l for l in text.splitlines()
+             if not re.search(r'remove or qualify claims of|claims to remove', l)]
+    body = '\n'.join(lines)
+    forbidden = [
+        'recovers reml',
+        'equivalent to reml',
+        'reml equivalent',
+        'approximates reml',
+        'reml approximation',
+        r'equal[^s].*reml',
+        r'reml.*equal[^s]',
+        'reml estimate',   # "REML estimates" as a claim this produces them
+    ]
+    hits = [p for p in forbidden if re.search(p, body)]
+    assert not hits, f"Forbidden REML-equivalence phrases found: {hits}"

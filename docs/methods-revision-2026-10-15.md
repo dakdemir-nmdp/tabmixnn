@@ -101,12 +101,21 @@ in an unbalanced design. Centering is disabled by default.
 When the decoder is scalar and linear with a Gaussian outcome, the mean
 structure reduces to X beta + Z u. For **fixed** covariance parameters and
 unrestricted Gaussian variational means, the optimum mean solves the Gaussian
-mixed-model normal equations. This does not imply that jointly optimized
-mean-field covariance estimates equal marginal ML or REML estimates. The
-variational restriction can bias covariance estimation; nonconvex optimization
-can also stop short of the optimum. REML additionally accounts for estimation
-of fixed effects through a restricted likelihood, which this objective does
-not implement. Compare the likelihood and REML formulations in
+mixed-model normal equations. This is the only sense in which the model
+connects to classical LMM theory, and it holds only under those two
+restrictions simultaneously.
+
+This implementation does **not** perform REML. REML integrates out the fixed
+effects beta analytically and maximizes a restricted likelihood that accounts
+for the loss of degrees of freedom from estimating beta. Mean-field VI
+optimizes the ELBO — a lower bound on the marginal likelihood — with respect
+to variational parameters (m, a) and, jointly, the covariance and network
+weights. These are fundamentally different algorithms: REML is a closed-form
+marginal optimization; mean-field VI is a stochastic gradient procedure on a
+variational bound. The mean-field restriction on q(v) can bias covariance
+estimates relative to both ML and REML; nonconvex optimization can also stop
+short of any stationary point. No equivalence between the two algorithms holds
+in general, and none is claimed here. Compare the REML derivation in
 [Bates et al., Fitting Linear Mixed-Effects Models Using lme4](https://cran.r-project.org/web/packages/lme4/vignettes/lmer.pdf).
 
 For neural decoders, latent-channel rotations, scales, and transformations can
