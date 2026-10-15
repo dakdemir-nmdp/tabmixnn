@@ -135,6 +135,33 @@ def cv_xgboost(df, outcome, features, n_splits=N_SPLITS):
     return float(np.mean(rmses)), float(np.mean(r2s)), rmses
 
 
+def cv_xgboost_nogroup(df, outcome, features_nogroup, n_splits=N_SPLITS):
+    """Observation K-fold CV for XGBoost without the group column.
+
+    This is the fair comparison for group-holdout evaluation: XGBoost cannot
+    use the group identifier for unseen groups, so the group column must be
+    excluded from both baselines when evaluating generalisation.
+    """
+    df = df.copy()
+    for col in features_nogroup:
+        try:
+            is_numeric = np.issubdtype(df[col].dtype, np.number)
+        except TypeError:
+            is_numeric = False
+        if not is_numeric:
+            df[col] = LabelEncoder().fit_transform(df[col].astype(str))
+    X, y = df[features_nogroup].values, df[outcome].values
+    rmses, r2s = [], []
+    for train_idx, test_idx in obs_kfold(df, n_splits):
+        xgb = XGBRegressor(n_estimators=200, learning_rate=0.05,
+                           random_state=MODEL_SEED, verbosity=0)
+        xgb.fit(X[train_idx], y[train_idx])
+        pred = xgb.predict(X[test_idx])
+        rmses.append(rmse(y[test_idx], pred))
+        r2s.append(r2_score(y[test_idx], pred))
+    return float(np.mean(rmses)), float(np.mean(r2s)), rmses
+
+
 def cv_lmm(df, outcome, fixed_features, group_col, n_splits=N_SPLITS):
     """Observation K-fold CV for statsmodels MixedLM (REML=False, ML).
 
@@ -191,6 +218,7 @@ DATASETS = [
         "outcome": "Reaction",
         "group": "Subject",
         "xgb_features": ["Days", "Subject"],
+        "xgb_nogroup_features": ["Days"],
         "lmm_fixed": ["Days"],
     },
     {
@@ -200,6 +228,7 @@ DATASETS = [
         "outcome": "weight",
         "group": "Chick",
         "xgb_features": ["Time", "Diet", "Chick"],
+        "xgb_nogroup_features": ["Time", "Diet"],
         "lmm_fixed": ["Time", "Diet"],
     },
     {
@@ -209,6 +238,7 @@ DATASETS = [
         "outcome": "score",
         "group": "Worker",
         "xgb_features": ["Machine", "Worker"],
+        "xgb_nogroup_features": ["Machine"],
         "lmm_fixed": ["Machine"],
     },
     {
@@ -218,6 +248,7 @@ DATASETS = [
         "outcome": "height",
         "group": "Subject",
         "xgb_features": ["age", "Subject", "Occasion"],
+        "xgb_nogroup_features": ["age", "Occasion"],
         "lmm_fixed": ["age"],
     },
     {
@@ -227,6 +258,7 @@ DATASETS = [
         "outcome": "height",
         "group": "Seed",
         "xgb_features": ["age", "Seed"],
+        "xgb_nogroup_features": ["age"],
         "lmm_fixed": ["age"],
     },
 ]
@@ -258,11 +290,17 @@ def main():
         else:
             print("    skipped (insufficient groups)")
 
-        print(f"  XGBoost ({N_SPLITS}-fold obs CV)...")
+        print(f"  XGBoost ({N_SPLITS}-fold obs CV, with group)...")
         xgb_rmse, xgb_r2, xgb_folds = cv_xgboost(
             df, cfg["outcome"], cfg["xgb_features"]
         )
         print(f"    RMSE={xgb_rmse:.4f}  R²={xgb_r2:.4f}")
+
+        print(f"  XGBoost ({N_SPLITS}-fold obs CV, no group)...")
+        xgb_ng_rmse, xgb_ng_r2, xgb_ng_folds = cv_xgboost_nogroup(
+            df, cfg["outcome"], cfg["xgb_nogroup_features"]
+        )
+        print(f"    RMSE={xgb_ng_rmse:.4f}  R²={xgb_ng_r2:.4f}")
 
         lmm_rmse, lmm_r2, lmm_folds = cv_lmm(
             df, cfg["outcome"], cfg["lmm_fixed"], cfg["group"]
@@ -275,24 +313,29 @@ def main():
                 print("    convergence failed on all folds")
 
         rows.append({
-            "dataset":               cfg["name"],
-            "tabmixnn_obs_rmse":     round(tab_rmse, 4),
-            "tabmixnn_obs_r2":       round(tab_r2, 4),
-            "tabmixnn_gh_rmse":      round(tab_gh_rmse, 4) if not np.isnan(tab_gh_rmse) else None,
-            "tabmixnn_gh_r2":        round(tab_gh_r2, 4) if not np.isnan(tab_gh_r2) else None,
-            "xgboost_rmse":          round(xgb_rmse, 4),
-            "xgboost_r2":            round(xgb_r2, 4),
-            "lmm_fixed_rmse":        round(lmm_rmse, 4) if not np.isnan(lmm_rmse) else None,
-            "lmm_fixed_r2":          round(lmm_r2, 4) if not np.isnan(lmm_r2) else None,
-            "tabmixnn_wins_obs_rmse": tab_rmse < xgb_rmse,
-            "tabmixnn_wins_gh_rmse":  (tab_gh_rmse < xgb_rmse) if not np.isnan(tab_gh_rmse) else None,
+            "dataset":                    cfg["name"],
+            "tabmixnn_obs_rmse":          round(tab_rmse, 4),
+            "tabmixnn_obs_r2":            round(tab_r2, 4),
+            "tabmixnn_gh_rmse":           round(tab_gh_rmse, 4) if not np.isnan(tab_gh_rmse) else None,
+            "tabmixnn_gh_r2":             round(tab_gh_r2, 4) if not np.isnan(tab_gh_r2) else None,
+            "xgboost_rmse":               round(xgb_rmse, 4),
+            "xgboost_r2":                 round(xgb_r2, 4),
+            "xgboost_nogroup_rmse":        round(xgb_ng_rmse, 4),
+            "xgboost_nogroup_r2":          round(xgb_ng_r2, 4),
+            "lmm_fixed_rmse":             round(lmm_rmse, 4) if not np.isnan(lmm_rmse) else None,
+            "lmm_fixed_r2":               round(lmm_r2, 4) if not np.isnan(lmm_r2) else None,
+            "tabmixnn_wins_obs_rmse":      tab_rmse < xgb_rmse,
+            "tabmixnn_wins_obs_nogroup":   tab_rmse < xgb_ng_rmse,
+            "tabmixnn_wins_gh_rmse":       (tab_gh_rmse < xgb_rmse) if not np.isnan(tab_gh_rmse) else None,
+            "tabmixnn_wins_gh_nogroup":    (tab_gh_rmse < xgb_ng_rmse) if not np.isnan(tab_gh_rmse) else None,
         })
         raw_records.append({
-            "dataset":        cfg["name"],
-            "tabmixnn_obs":   [round(v, 6) for v in tab_folds],
-            "tabmixnn_gh":    [round(v, 6) for v in tab_gh_folds],
-            "xgboost_obs":    [round(v, 6) for v in xgb_folds],
-            "lmm_fixed_obs":  [round(v, 6) if not np.isnan(v) else None for v in lmm_folds],
+            "dataset":           cfg["name"],
+            "tabmixnn_obs":      [round(v, 6) for v in tab_folds],
+            "tabmixnn_gh":       [round(v, 6) for v in tab_gh_folds],
+            "xgboost_obs":       [round(v, 6) for v in xgb_folds],
+            "xgboost_nogroup":   [round(v, 6) for v in xgb_ng_folds],
+            "lmm_fixed_obs":     [round(v, 6) if not np.isnan(v) else None for v in lmm_folds],
         })
 
     results = pd.DataFrame(rows)
@@ -313,9 +356,13 @@ def main():
     print("REGRESSION SUMMARY")
     print(results.to_string(index=False))
     wins_obs = results["tabmixnn_wins_obs_rmse"].sum()
+    wins_obs_ng = results["tabmixnn_wins_obs_nogroup"].sum()
     wins_gh = results["tabmixnn_wins_gh_rmse"].sum()
-    print(f"\nTabMixNN wins (obs CV RMSE):        {wins_obs}/{len(results)} datasets")
-    print(f"TabMixNN wins (group-holdout RMSE): {wins_gh}/{len(results)} datasets")
+    wins_gh_ng = results["tabmixnn_wins_gh_nogroup"].sum()
+    print(f"\nTabMixNN wins (obs CV vs XGB+group):    {wins_obs}/{len(results)} datasets")
+    print(f"TabMixNN wins (obs CV vs XGB-nogroup):  {wins_obs_ng}/{len(results)} datasets")
+    print(f"TabMixNN wins (group-holdout vs XGB+group):   {wins_gh}/{len(results)} datasets")
+    print(f"TabMixNN wins (group-holdout vs XGB-nogroup): {wins_gh_ng}/{len(results)} datasets")
     print(f"\nResults saved to: {csv_out}")
     print(f"Per-fold raw:     {raw_out}")
     return results

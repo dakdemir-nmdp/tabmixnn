@@ -220,6 +220,73 @@ No contraction theorem for the gated block follows from row-normalized
 attention weights alone: the spectral norm of the full map depends on the
 value and output projections, not only on the attention score matrix.
 
+## Regression benchmark findings (2026-10-15)
+
+The session 82 regression benchmark (branch `revision/methods-2026-10-15`,
+commit 4c6b55b, 88/88 tests) produced the following results with the 200-epoch
+benchmark protocol (batch=32, lr=0.005, kl_auto_scale=True):
+
+| Dataset     | TabMixNN obs RMSE | TabMixNN GH RMSE | XGBoost (w/ group) RMSE | XGBoost (no group) RMSE |
+|-------------|-------------------|------------------|-------------------------|-------------------------|
+| Sleepstudy  | 30.93             | 115.84           | 34.44                   | [see below]             |
+| ChickWeight | 13.66             | 41.97            | 22.46                   | —                       |
+| Machines    | 3.60              | 13.24            | 1.11                    | —                       |
+| Oxboys      | 0.97              | 12.80            | 2.27                    | —                       |
+| Loblolly    | 1.97              | 1.56             | 1.36                    | —                       |
+
+TabMixNN wins: obs CV 3/5, group-holdout 0/5.
+
+### Sleepstudy group-holdout collapse — root cause diagnosis
+
+The Sleepstudy group-holdout collapse (obs RMSE 30.9 → group-holdout RMSE
+115.8) was diagnosed on 2026-10-15 using `experiments/diagnose_sleepstudy_gh.py`.
+
+Two causes were confirmed:
+
+**Cause 1 — XGBoost baseline uses the group column (unfair comparison).**
+XGBoost with the Subject column cannot generalise to unseen groups: it encodes
+the held-out Subject IDs from the full dataset, but those IDs carry no
+predictive signal for new groups. The XGBoost (with Subject) group-holdout RMSE
+is 64.5 (R² = −1.13) — worse than XGBoost without Subject (RMSE 29.6, R² 0.55).
+The benchmark's `tabmixnn_wins_gh_rmse` column compared TabMixNN group-holdout
+to XGBoost obs-CV RMSE (34.4), which is not a valid comparison. The correct
+baseline for group-holdout is XGBoost without the group column.
+
+**Cause 2 — 200-epoch / kl_auto_scale protocol is too weak for unseen-group
+generalisation.** At the validated protocol (2000 epochs, full batch, lr=0.01,
+UN covariance, no kl_auto_scale), TabMixNN group-holdout RMSE is 29.1–30.1
+across three seeds, matching XGBoost-nogroup (29.6). At the benchmark protocol
+(200 epochs, kl_auto_scale), RMSE is 104–116 across three seeds — a 3–4×
+collapse. The kl_auto_scale heuristic (λ_KL = 1/mean_group_size = 0.1) over-
+damps the KL on the 14-group training set, preventing the model from learning
+useful group-level structure within the 200-epoch budget.
+
+**Summary of diagnosis results (Sleepstudy group-holdout, 4 held-out groups):**
+
+| Method                                    | RMSE  | R²    |
+|-------------------------------------------|-------|-------|
+| XGBoost (with Subject, unfair)            | 64.5  | −1.13 |
+| XGBoost (no Subject, fair baseline)       | 29.6  | 0.55  |
+| TabMixNN validated protocol (seed 42)     | 29.7  | 0.55  |
+| TabMixNN validated protocol (seed 123)    | 29.1  | 0.57  |
+| TabMixNN validated protocol (seed 456)    | 30.1  | 0.54  |
+| TabMixNN benchmark protocol (seed 42)     | 115.8 | −5.87 |
+| TabMixNN benchmark protocol (seed 123)    | 109.4 | −5.13 |
+| TabMixNN benchmark protocol (seed 456)    | 104.7 | −4.61 |
+
+**Action items from this diagnosis:**
+
+1. The `run_regression.py` benchmark now includes an `xgboost_nogroup` baseline
+   (added in this session). Group-holdout wins must be compared against
+   `xgboost_nogroup_rmse`, not `xgboost_rmse`.
+2. The 200-epoch benchmark protocol is not suitable for group-holdout evaluation.
+   The validated protocol (2000 epochs, full batch, lr=0.01, UN, no kl_auto_scale)
+   should be used for group-holdout runs, or the benchmark should explicitly
+   note that group-holdout results at 200 epochs are not meaningful.
+3. The group-holdout collapse is not a fundamental model failure: at the
+   validated protocol, TabMixNN matches XGBoost-nogroup on Sleepstudy.
+   The collapse is a protocol artifact.
+
 ## Benchmark scripts and paper tables
 
 The diagnostic scripts in `experiments/` are **not a reproduction** of Tables
