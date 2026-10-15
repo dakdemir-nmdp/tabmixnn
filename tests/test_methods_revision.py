@@ -420,3 +420,30 @@ def test_methods_revision_contains_no_reml_equivalence_claim():
     ]
     hits = [p for p in forbidden if re.search(p, body)]
     assert not hits, f"Forbidden REML-equivalence phrases found: {hits}"
+
+
+def test_methods_revision_contains_no_fixed_point_equivalence_claim():
+    """
+    The methods revision doc must not claim the composite block is a fixed-point
+    iteration or equivalent to the manuscript coupled equation.
+    Permitted: explaining what the architecture is and how it differs.
+    Forbidden: any claim of equivalence, approximation, or iteration identity.
+    """
+    import pathlib, re
+    doc = pathlib.Path(__file__).parent.parent / 'docs' / 'methods-revision-2026-10-15.md'
+    text = doc.read_text().lower()
+    # Exclude lines that enumerate claims to remove.
+    lines = [l for l in text.splitlines()
+             if not re.search(r'remove or replace|claims to remove', l)]
+    body = '\n'.join(lines)
+    forbidden = [
+        r'one iteration of eq',
+        r'approximat\w+ to.*eq\.?\s*22',
+        r'eq\.?\s*22.*approximat',
+        r'equivalent to.*fixed.point',
+        r'fixed.point.*equivalent',
+        r'implements.*eq\.?\s*22',
+        r'eq\.?\s*22.*implement',
+    ]
+    hits = [p for p in forbidden if re.search(p, body)]
+    assert not hits, f"Forbidden fixed-point equivalence phrases found: {hits}"

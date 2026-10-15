@@ -178,27 +178,44 @@ likelihood must not be substituted for marginal likelihood in classical
 AIC/BIC; those criteria are now unavailable. MC variation from latent draws
 alone does not include observation noise or all parameter uncertainty.
 
-## Structural architecture and claims to remove
+## Structural architecture
 
-The default composite block computes
+The default composite block (`CompositeStructuralModel`) is a **gated
+static-dynamic block**. Its forward pass is the three-step sequential
+computation:
 
-    u = (I - B_static)^-1 xi
-    a = Attention(u)
-    h = alpha u + (1-alpha) a.
+    u = (I - B_static)^{-1} xi          # static resolve
+    a = Attention(u)                     # dynamic attention over resolved state
+    h = alpha * u + (1 - alpha) * a      # gated fusion, alpha in (0, 1)
 
-This is a gated sequential architecture. It is neither the coupled fixed point
-in manuscript Eq. 22 nor one iteration of that fixed-point scheme. Revise the
-equation to describe this architecture, or implement and validate the intended
-coupled solver before using its claims. The local approximation diagnostic now
-requires the coupled reference to meet its residual tolerance, reports an
-unbounded nonnegative relative difference, and raises on nonconvergence. It is
-not a global approximation guarantee. No contraction theorem for state-dependent
-attention follows from row-normalized attention weights alone.
+This is a single-pass feedforward architecture. It is **not** a fixed-point
+equation and is **not** an iterative solver. The manuscript equation that
+describes a coupled fixed point (where both the static and dynamic terms depend
+on the same unknown h) is a different model. The two are not equivalent and
+cannot be made equivalent by choosing alpha: with B_static = 0, Attention = 0,
+alpha = 0.5, the gated block returns xi/2 while the fixed-point equation
+returns xi — a 50% relative error at every input. This counterexample is
+verified analytically in the test suite
+(`test_composite_is_not_one_iteration_even_with_zero_operators`).
 
-Remove or qualify claims of exact REML recovery, exact nonlinear BLUPs, learned
-causal DAGs, implemented SHAP/edge Shapley values, calibrated prediction
-intervals, and complete reproduction of the published tables. Some public
-legacy methods still use these labels and are listed as unresolved in the
-audit. The new Sleepstudy runs establish only the specific validation scope in
-the companion report; the original Tables 2–4 require their original datasets,
-splits, configurations, and per-fold outputs before their claims can be verified.
+The manuscript equation must be revised to describe the gated static-dynamic
+block as implemented, or the coupled fixed-point solver must be separately
+implemented, validated for convergence, and described on its own terms before
+any claims about it are made. `HybridStructuralModel` provides the iterative
+path; it is not the default and its convergence is not guaranteed for
+state-dependent attention.
+
+No contraction theorem for the gated block follows from row-normalized
+attention weights alone: the spectral norm of the full map depends on the
+value and output projections, not only on the attention score matrix.
+
+## Claims to remove from the manuscript
+
+Remove or replace with accurate descriptions: exact REML recovery, exact
+nonlinear BLUPs, learned causal DAGs, implemented SHAP/edge Shapley values,
+calibrated prediction intervals, and complete reproduction of the published
+tables. Some public legacy methods still use these labels and are listed as
+unresolved in the audit. The new Sleepstudy runs establish only the specific
+validation scope in the companion report; the original Tables 2–4 require
+their original datasets, splits, configurations, and per-fold outputs before
+their claims can be verified.
