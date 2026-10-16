@@ -224,11 +224,59 @@ value and output projections, not only on the attention score matrix.
 
 ## Regression benchmark findings (2026-10-15)
 
-The session 84 regression benchmark (branch `revision/methods-2026-10-15`,
-commit 2766b6c+, 88/88 tests) produced the following results with the 200-epoch
-benchmark protocol (batch=32, lr=0.005, kl_auto_scale=True). The
-`xgboost_nogroup` baseline excludes the group column — the fair comparison
-for group-holdout evaluation.
+The primary results below use the **after-repair validated protocol** (session
+86, commit e3b4502, 105/105 tests): 2000 full-batch AdamW steps, lr=0.01, UN
+covariance, beta=1, kl_auto_scale=False, hidden [32], embedding 8, seeds
+[42, 123, 456]. The `xgboost_nogroup` baseline excludes the group column — the
+fair comparison for group-holdout evaluation. See
+[package repairs](package-improvements-2026-10-15.md) for the initialization
+and regularization changes that distinguish these from the session-85 runs.
+
+### After-repair validated-protocol group-holdout results (session 86, all 5 datasets)
+
+Mean RMSE over seeds [42, 123, 456]. Script: `experiments/run_gh_validated.py`
+with the session-86 package (commit e3b4502).
+
+| Dataset     | XGB-nogroup RMSE | TabMixNN RMSE | TabMixNN R² | Result |
+|-------------|-----------------|---------------|-------------|--------|
+| Sleepstudy  | 29.64           | 28.13         | 0.58        | WIN    |
+| ChickWeight | 42.75           | 39.26         | 0.71        | WIN    |
+| Machines    | 5.07            | 4.29          | 0.68        | WIN    |
+| Oxboys      | 11.51           | 11.27         | −0.55       | WIN    |
+| Loblolly    | 1.16            | 1.31          | 0.99        | loss   |
+
+TabMixNN wins (GH, after-repair validated protocol): **4/5**.
+
+Per-seed RMSE (seed 42 / 123 / 456):
+
+| Dataset     | Seed 42 | Seed 123 | Seed 456 |
+|-------------|--------:|---------:|---------:|
+| Sleepstudy  | 28.10   | 28.06    | 28.24    |
+| ChickWeight | 39.97   | 38.98    | 38.84    |
+| Machines    | 4.39    | 4.11     | 4.37     |
+| Oxboys      | 11.20   | 11.39    | 11.23    |
+| Loblolly    | 1.22    | 1.42     | 1.28     |
+
+Notes:
+- Machines: only 1 held-out group (6 workers × 25% = 1.5 → 1). All three seeds
+  win after the initialization repair (4.39/4.11/4.37 vs 5.07). High variance
+  from a single held-out group; not a reliable signal on its own.
+- Oxboys: both methods have negative R² on the held-out groups — the fixed
+  effect of age alone is a poor predictor for unseen subjects at new age
+  ranges. TabMixNN is marginally better (11.27 vs 11.51) but neither is useful.
+  The XGB comparison uses an extra `Occasion` feature.
+- Loblolly: XGBoost-nogroup wins (1.16 vs 1.31 mean). The random intercept for
+  Seed captures tree-family baseline height; without group identity, TabMixNN
+  cannot recover this from age alone. Exact cause of the remaining gap is
+  unresolved.
+- The combined initialization and bias-decay changes were measured together;
+  their separate causal effects were not isolated.
+
+### Historical: session-84 minibatch protocol (200 epochs, kl_auto_scale=True)
+
+Retained for protocol comparison only. These results used batch=32, lr=0.005,
+kl_auto_scale=True (commit 2766b6c, 88/88 tests) and are superseded by the
+after-repair validated-protocol results above.
 
 | Dataset     | TabMixNN obs | TabMixNN GH | XGB+group | XGB-nogroup | LMM (fixed) |
 |-------------|-------------|-------------|-----------|-------------|-------------|
@@ -238,8 +286,10 @@ for group-holdout evaluation.
 | Oxboys      | 0.97         | 12.80       | 2.27      | 8.44        | 8.01        |
 | Loblolly    | 1.97         | 1.56        | 1.36      | 1.74        | 3.23        |
 
-TabMixNN wins (obs CV vs XGB+group): 3/5. Obs CV vs XGB-nogroup: 4/5.
+Obs CV vs XGB+group: 3/5. Obs CV vs XGB-nogroup: 4/5.
 Group-holdout vs XGB+group: 0/5. Group-holdout vs XGB-nogroup: 1/5 (Loblolly).
+The group-holdout collapse (GH RMSE 115.84 for Sleepstudy) is a protocol
+artifact; see the diagnosis subsection below.
 
 ### Sleepstudy group-holdout collapse — root cause diagnosis
 
@@ -283,16 +333,11 @@ Gaussian initialization defect and reports results after correcting it.
 
 **Action items from this diagnosis:** addressed in session 85 (see below).
 
-### Validated-protocol group-holdout results (session 85, all 5 datasets)
+### Historical: session-85 pre-repair validated-protocol results
 
-Historical results before the session-86 package repairs. The later
-[paired diagnostics](package-improvements-2026-10-15.md) update these results
-and qualify the original causal interpretation.
-
-Running the validated protocol (2000 epochs, full batch, lr=0.01, UN,
-no kl_auto_scale) across all 5 datasets confirms that the group-holdout
-collapse is a protocol artifact for most datasets. Results are means over
-seeds [42, 123, 456]. Script: `experiments/run_gh_validated.py`.
+Retained for comparison. These used the same 2000-step full-batch protocol but
+the pre-repair package (commit 6673fa0). Superseded by the session-86
+after-repair results above.
 
 | Dataset     | XGB-nogroup RMSE | TabMixNN RMSE | TabMixNN R² | Result |
 |-------------|-----------------|---------------|-------------|--------|
@@ -302,24 +347,11 @@ seeds [42, 123, 456]. Script: `experiments/run_gh_validated.py`.
 | Oxboys      | 11.51           | 10.91         | −0.52       | WIN    |
 | Loblolly    | 1.16            | 1.71          | 0.99        | loss   |
 
-TabMixNN wins (GH, validated protocol): **3/5**.
-
-Notes:
-- Machines: only 1 held-out group (6 workers × 25% = 1.5 → 1). High variance;
-  seed 123 wins (4.97 vs 5.07), seeds 42 and 456 lose. Not a reliable signal.
-- Oxboys: both methods have negative R² on the held-out groups — the fixed
-  effect of age alone is a poor predictor for unseen subjects at new age
-  ranges. TabMixNN is marginally better (10.91 vs 11.51) but neither is useful.
-- Loblolly: XGBoost-nogroup wins cleanly (1.16 vs 1.71). The random intercept
-  for Seed captures tree-family baseline height; without group identity,
-  TabMixNN cannot recover this from age alone, and neither can XGBoost —
-  but XGBoost's nonlinear age fit is tighter on this small dataset.
-- The earlier runs changed epochs, batch size, learning rate, covariance, and
-  KL weighting together, so they do not isolate which setting caused the
-  differences. Session 86 improves Machines and Loblolly with package-level
-  initialization and regularization repairs; the prior claim that their losses
-  established inherent limitations is withdrawn. Loblolly still loses on this
-  split, and its exact cause remains unresolved.
+TabMixNN wins (GH, pre-repair): **3/5**. The session-86 initialization repair
+improves Machines from a loss (5.56) to a win (4.29) and narrows Loblolly
+(1.71 → 1.31), which still loses. See
+[package repairs](package-improvements-2026-10-15.md) for the paired before/after
+comparison and causal caveats.
 
 ## Benchmark scripts and paper tables
 
