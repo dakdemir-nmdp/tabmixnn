@@ -1,0 +1,17 @@
+\begin{table}[htbp]
+\centering
+\small
+\caption{Regression RMSE in original outcome units (lower is better). Regime A: observation holdout within known groups. Neural entries are mean $\pm$ sample SD over three initialization seeds on one fixed split; other methods use one deterministic fit. These SDs are not confidence intervals.}
+\label{tab:regression_A}
+\begin{tabular}{lrrrrr}
+\toprule
+Dataset (unit) & TabMixNN & Fixed NN & Mixed & XGBoost & RF \\
+\midrule
+Sleepstudy (ms) & $33.597 \pm 2.217$ & $48.007 \pm 0.269$ & 32.190 & 31.184 & 34.618 \\
+ChickWeight (g) & $5.580 \pm 0.103$ & $40.278 \pm 0.389$ & 30.948 & 17.260 & 31.733 \\
+Machines (score) & $1.021 \pm 0.122$ & $6.428 \pm 0.000$ & 3.431 & 0.656 & 2.528 \\
+Oxboys (cm) & $0.847 \pm 0.009$ & $8.274 \pm 0.004$ & 0.926 & 1.864 & 4.430 \\
+Loblolly (ft) & $0.812 \pm 0.147$ & $1.909 \pm 0.090$ & 2.582 & 1.989 & 1.882 \\
+\bottomrule
+\end{tabular}
+\end{table}

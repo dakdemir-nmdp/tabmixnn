@@ -1,0 +1,20 @@
+\begin{table}[htbp]
+\centering
+\small
+\caption{Classification AUROC (higher is better) and Brier score (lower is better). Regime B: entirely unseen groups, without labeled support. Neural entries are mean $\pm$ sample SD over three initialization seeds on one fixed split; other methods use one deterministic fit. These SDs are not confidence intervals.}
+\label{tab:classification_B}
+\begin{tabular}{llrrrrr}
+\toprule
+Dataset & Metric & TabMixNN & Fixed NN & Mixed & XGBoost & RF \\
+\midrule
+Aids2 & AUC & $0.540 \pm 0.008$ & $0.529 \pm 0.010$ & 0.489 & 0.538 & 0.546 \\
+Aids2 & Brier & $0.241 \pm 0.001$ & $0.242 \pm 0.002$ & 0.239 & 0.239 & 0.239 \\
+Males & AUC & $0.620 \pm 0.020$ & $0.650 \pm 0.027$ & 0.651 & 0.723 & 0.674 \\
+Males & Brier & $0.230 \pm 0.006$ & $0.211 \pm 0.008$ & 0.228 & 0.183 & 0.196 \\
+VerbAgg & AUC & $0.697 \pm 0.007$ & $0.679 \pm 0.003$ & 0.700 & 0.668 & 0.663 \\
+VerbAgg & Brier & $0.242 \pm 0.004$ & $0.230 \pm 0.001$ & 0.223 & 0.238 & 0.244 \\
+Train & AUC & $0.737 \pm 0.003$ & $0.683 \pm 0.010$ & 0.723 & 0.702 & 0.668 \\
+Train & Brier & $0.256 \pm 0.003$ & $0.267 \pm 0.004$ & 0.215 & 0.230 & 0.233 \\
+\bottomrule
+\end{tabular}
+\end{table}

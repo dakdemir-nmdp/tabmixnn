@@ -1,0 +1,31 @@
+{
+  "source_sha256": "20922ddc87d538bf2344f73d49000eeb2d7e14934b6191a3e071fefc329942c4",
+  "code_sha256": "5ab3a58e61872aa0fdde000e8898c84905b04594bd93388c34199275b8cda3b7",
+  "seed": 42,
+  "epochs": 2000,
+  "n_training": 180,
+  "background_size": 180,
+  "trained_on": "all observations, descriptive only",
+  "unit": "milliseconds",
+  "perturbation": "fixed-design x0 (standardized Days); random slopes and group indices unchanged",
+  "example_days": [
+    0,
+    5,
+    9
+  ],
+  "subject_labels": "anonymous source-order numbers 1 through 18",
+  "slope_summary": {
+    "mean": 9.170781635969046,
+    "minimum": 1.8506706906087471,
+    "maximum": 14.793187788761019
+  },
+  "artifacts": {
+    "shap_days_effect_per_subject.png": "b5e4fc0341451113ee94899d4c50bb41d5526de23e2bc36387d81448c5efc313",
+    "shap_days_effect_per_subject.pdf": "d8300cfd4ef0730706600c17e12a326d935e6a375fa73ae1f04ee31cf39a8df3",
+    "shap_subject_effect_comparison.png": "204d49b4532fbf5bbaff354afb6400aa26c18dcb8f5239cb7e1b18a1528681fe",
+    "shap_subject_effect_comparison.pdf": "e510b6ad2a907f0a9a0e0b0b6115e3f3fa3211105e35f0c70192fe0a31cb852e",
+    "shap_waterfall_subjects.png": "54d82093a394a700e1f121d079cfd9aab343f31c26d57e02ac3914900aad7cfa",
+    "shap_waterfall_subjects.pdf": "1cbd763d1bd2e4dcee2c23d0d1ba2a9c156fea545dc9a416c13a60437cc38230"
+  },
+  "api_perturbation_check": "passed"
+}

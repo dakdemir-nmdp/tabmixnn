@@ -1,3 +1,6 @@
 data/
 results/*
 !results/methods_sleepstudy.json
+!results/manuscript_benchmarks.json
+!results/manuscript_ablation.json
+!results/manuscript_figures.json

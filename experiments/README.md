@@ -1,77 +1,85 @@
-# TabMixNN Benchmark Experiments
+# Reproducible manuscript experiments
 
-Exploratory benchmark scripts. These do **not** reproduce Tables 2–4 of
-arXiv:2512.23787: the dataset set and protocols differ, and original run artifacts
-are unavailable. See `../docs/methods-audit-2026-10-15.md`.
+The canonical manuscript suite is `run_manuscript_benchmarks.py`. It evaluates
+all nine datasets supported by `data_utils.py` in two prediction settings:
 
-For the validated methods check (train-only preprocessing, matched splits,
-independent mixed-model reference, three seeds):
+- **A: known groups.** Hold out 25% (rounded down, minimum one) of observations
+  separately within every group having at least two observations. At least one
+  row remains for each tested group. Singleton groups remain training-only.
+  This is random observation holdout, not future-time forecasting.
+- **B: unseen groups.** Hold out 25% (rounded down, minimum one) of entire
+  groups. No test outcomes or labeled support enter fitting or adaptation.
 
-```bash
-uv pip install --python .venv/bin/python statsmodels scipy
-.venv/bin/python experiments/validate_sleepstudy.py
+Both splits use seed 20261015 and are shared by every comparator. Source
+hashes and explicit row positions are saved; group identifiers are not exported.
+
+## Run
+
+From the repository root, using its editable-install virtual environment:
+
+```sh
+uv pip install --python .venv/bin/python statsmodels scipy xgboost matplotlib
+# R must have lme4 and jsonlite installed.
+.venv/bin/python experiments/run_manuscript_benchmarks.py
+.venv/bin/python experiments/run_manuscript_ablation.py
+.venv/bin/python experiments/create_feature_ablation_plots.py
+.venv/bin/python experiments/build_manuscript_tables.py
+.venv/bin/python -m pytest
 ```
 
-Aggregate results are in `results/methods_sleepstudy.json`. This is a focused
-Sleepstudy validation, not evidence of performance across the full benchmark suite.
+`--resume` skips completed dataset/regime pairs only after exact protocol and
+benchmark-source-hash checks. `--datasets Sleepstudy --epochs 5 --seeds 42
+--output experiments/data/smoke.json` is a smoke run, not a manuscript run.
+Canonical tables require all 18 dataset/regime pairs and the separate ablations.
 
-## Setup
+## Protocol
 
-```bash
-# Create uv venv (avoids macOS system Python MPS segfault)
-uv venv .venv --python 3.11
-source .venv/bin/activate
-uv pip install torch --index-url https://download.pytorch.org/whl/cpu
-uv pip install numpy pandas patsy scikit-learn tqdm xgboost requests
-pip install -e . --no-deps
-```
+TabMixNN: one hidden layer of width 32, embedding width 8, UN covariance,
+2,000 full-batch Adam updates, learning rate .01, KL multiplier one, zero
+weight decay, no dropout/centering, and no early stopping. Three model seeds:
+42, 123, 456. Full batches retain source order; a benchmark-only adapter caches
+tensors and uses the unchanged package training loop. A gradient-equivalence
+test checks this adapter against ordinary DataLoader collation.
 
-## Datasets
+Fixed NN removes random effects and otherwise uses the same architecture and
+budget. Sleepstudy additionally has a scalar linear VI control. lme4 uses
+ML for LMMs and Laplace approximate ML (`nAGQ=1`) for binomial GLMMs; known
+groups use conditional fitted effects, new groups use zero effects. The latter
+is a plug-in prediction, not integration over the random-effect distribution.
+Convergence messages and singular fits are retained in the aggregate output.
 
-Downloaded automatically from [Rdatasets](https://vincentarelbundock.github.io/Rdatasets/)
-and cached in `experiments/data/`.
+XGBoost uses 200 trees, depth 6, learning rate .05. Random Forest uses 200 trees
+and minimum leaf size 2. Both use seed 42 and one thread. All methods have
+identical substantive predictors. Trees additionally receive training-fitted
+one-hot group identity in A; group identity is absent from their B predictors.
+Numeric standardization, dummy levels and target scaling use training rows only.
+Unknown categorical levels map to the training reference coding. No model is
+selected using test labels, and there is no hyperparameter search.
 
-| Dataset     | Task           | n     | Groups | Formula |
-|-------------|----------------|-------|--------|---------|
-| Sleepstudy  | Regression     | 180   | 18 subjects | `Reaction ~ Days + (1+Days\|Subject)` |
-| ChickWeight | Regression     | 578   | 50 chicks   | `weight ~ Time + Diet + (1\|Chick)` |
-| Machines    | Regression     | 54    | 6 workers   | `score ~ Machine + (1\|Worker)` |
-| Oxboys      | Regression     | 234   | 26 subjects | `height ~ age + (1+age\|Subject)` |
-| Loblolly    | Regression     | 84    | 14 seeds    | `height ~ age + (1\|Seed)` |
-| Aids2       | Classification | 2843  | states      | `status ~ age + sex + T.categ + (1\|state)` |
-| Males       | Classification | 4360  | individuals | `union ~ school + exper + ethn + (1\|nr)` |
-| VerbAgg     | Classification | 7584  | subjects    | `r2 ~ Anger + Gender + btype + situ + mode + (1\|id)` |
-| Train       | Classification | 2929  | individuals | `choice ~ price + time + change + comfort + (1\|id)` |
+Regression RMSE/MAE are back-transformed to original units. Classification
+reports AUROC, Brier score, log loss and accuracy. Tables summarize neural
+metrics by mean and sample SD across seeds on the **same split**. This SD
+measures initialization variability, not sampling uncertainty or a confidence
+interval. No cross-dataset average of raw RMSE is meaningful.
 
-## Running
+Aids2 predicts recorded final vital status, not fixed-horizon survival risk.
+Its varying observation times limit interpretation. Males predicts union
+membership; VerbAgg predicts a dichotomized response; Train predicts choice1.
+No clinical use or external validation is claimed.
 
-```bash
-cd /path/to/tabmixnn
+## Artifacts and historical scripts
 
-# Regression (Tables 2-3): ~5-10 min
-python experiments/run_regression.py
+`results/manuscript_benchmarks.json` contains protocols, versions, source
+hashes, split manifests, per-seed metrics and baseline diagnostics.
+`results/manuscript_ablation.json` contains matched Sleepstudy component
+comparisons. `results/manuscript_figures.json` records descriptive plot provenance.
+Downloaded public records, intermediate R inputs and per-row predictions stay
+in ignored `data/`; no source records are committed.
 
-# Classification (Table 4): ~10-20 min
-python experiments/run_classification.py
-```
-
-Results are saved to `experiments/results/`:
-- `regression_results.csv` — RMSE and R² per dataset
-- `classification_results.csv` — AUC and accuracy per dataset
-
-## TabMixNN Configuration
-
-All runs use:
-- `hidden_dims=[32]`, `embedding_dim=8`
-- `learning_rate=0.005` (paper ablation optimum)
-- `kl_auto_scale=True` (λ_KL = 1/n̄_group, FIX-1)
-- `epochs=100`, `batch_size=32` (regression) / `64` (classification)
-- 5-fold CV, `random_state=42`
-
-## Notes
-
-- XGBoost baseline uses the same features but no random-effects structure.
-- Group columns are included as plain features for XGBoost so it has access
-  to the same information (but cannot model the RE covariance structure).
-- SSL certificate verification is disabled for Rdatasets downloads on macOS
-  (system Python 3.10 certificate issue); data is cached after first download.
+The earlier `run_regression.py`, `run_classification.py`,
+`run_gh_validated.py`, and `validate_sleepstudy.py` are retained as historical
+or targeted diagnostics. Their splits, budgets or predictors differ. They do
+not generate the revised manuscript tables, and their results must not be
+pooled with this suite. Unsupported historical Abalone/other benchmark rows
+are excluded from the revised manuscript. Multitask and survival interfaces
+are described as implemented capabilities, not empirically validated here.

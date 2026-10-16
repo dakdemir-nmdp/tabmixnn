@@ -1,0 +1,17 @@
+\begin{table}[htbp]
+\centering
+\small
+\caption{Regression RMSE in original outcome units (lower is better). Regime B: entirely unseen groups, without labeled support. Neural entries are mean $\pm$ sample SD over three initialization seeds on one fixed split; other methods use one deterministic fit. These SDs are not confidence intervals.}
+\label{tab:regression_B}
+\begin{tabular}{lrrrrr}
+\toprule
+Dataset (unit) & TabMixNN & Fixed NN & Mixed & XGBoost & RF \\
+\midrule
+Sleepstudy (ms) & $29.985 \pm 1.696$ & $29.550 \pm 0.090$ & 29.446 & 29.644 & 29.407 \\
+ChickWeight (g) & $41.224 \pm 0.598$ & $42.758 \pm 0.024$ & 41.078 & 42.751 & 42.702 \\
+Machines (score) & $3.889 \pm 0.140$ & $5.072 \pm 0.001$ & 5.072 & 5.073 & 5.143 \\
+Oxboys (cm) & $11.098 \pm 0.903$ & $11.307 \pm 0.000$ & 11.313 & 11.511 & 11.449 \\
+Loblolly (ft) & $1.473 \pm 0.165$ & $1.229 \pm 0.067$ & 2.650 & 1.164 & 1.165 \\
+\bottomrule
+\end{tabular}
+\end{table}
