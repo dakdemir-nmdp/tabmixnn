@@ -1,7 +1,7 @@
 # TabMixNN revised manuscript (author-review draft)
 
 The main source is `tabmixnn_methods.tex`, with `benchmarks_template.tex`,
-`references.bib`, seven generated table inputs and `shap_examples.tex`.
+`references.bib`, ten generated table inputs, `shap_examples.tex` and `variational_appendix.tex`.
 The three figure filenames retain their historical `shap_` prefix for source
 compatibility; all plotted quantities and captions are feature ablations.
 Vector PDF assets are used by LaTeX; PNG exports are also provided.
@@ -17,8 +17,11 @@ pdflatex -interaction=nonstopmode -halt-on-error tabmixnn_methods.tex
 
 Experiment reproduction is documented in `../experiments/README.md`.
 `../docs/manuscript-revision-2026-10-16.md` records the audit, changes and checks.
-The manuscript's results are generated from the three `manuscript_*.json`
-aggregate files in `../experiments/results/`.
+Primary results, four additional split runs, calibration/sensitivity summaries
+and figure provenance are saved as `manuscript_*.json` in
+`../experiments/results/`. The finite-dimensional symbolic check is stored
+separately as `variational_identities.json`. The deep revision audit is
+`../docs/deep-revision-2026-10-16.md`.
 
 The downloaded arXiv archive and unused legacy `summary_table.tex`,
 `regression_table.tex`, and `classification_table.tex` may remain locally.

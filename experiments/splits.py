@@ -42,12 +42,13 @@ def group_holdout(
     df: pd.DataFrame,
     group_col: str,
     holdout_frac: float = 0.25,
+    seed: int = SPLIT_SEED,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return boolean (train_mask, test_mask) holding out a fraction of groups.
 
     The held-out groups are chosen deterministically from SPLIT_SEED.
     """
-    rng = np.random.default_rng(SPLIT_SEED)
+    rng = np.random.default_rng(seed)
     groups = df[group_col].unique()
     n_holdout = max(1, int(len(groups) * holdout_frac))
     holdout_groups = rng.choice(groups, size=n_holdout, replace=False)

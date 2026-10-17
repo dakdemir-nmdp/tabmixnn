@@ -22,10 +22,39 @@
     "early_stopping": false
   },
   "code_hashes": {
-    "experiments/run_manuscript_benchmarks.py": "a41682c361882ca54b6243196a4c3f6f09546de8026d6d993eb934872fd26060",
+    "experiments/run_manuscript_benchmarks.py": "6df9e9f2272007c92c317c471edc3f9600764cd33c748dda36f24154bcb7698c",
     "experiments/mixed_reference.R": "c17c08940baa429a0a0666f083a7d9ed248a13229647e0f61529098a04db5e38",
     "experiments/data_utils.py": "11068fedc32392fcb97aadd66ca0dc67d160338a81c0cfa3cdfae8cd2d76c6c6",
-    "experiments/splits.py": "39091ab37b028e1d15af17fd4e5b18f8124261ce8fb5b1642a0b9118dbaf1576"
+    "experiments/splits.py": "6001bff74845ee669d69d67e2b237e9810b6a6994d1a4dfc3823229aa58fd131",
+    "__init__.py": "2bc8c32a3a38bb9fab88c97153bd38d56a7b0bae9fd0f44ce709bb60521009fc",
+    "backbones/__init__.py": "410c574461edd033db3659a63659fbbc13cd6d9052f493144f7388d1ef8ad83a",
+    "backbones/base.py": "7635804098c73465666b946d16a4adadc59e574216a16ba2396cc6fdc257f84c",
+    "backbones/gsem.py": "c42d1fa72d18546679bd211b07a11b9caf23fe0bb8b98178588ebb383262fd15",
+    "backbones/manifold.py": "c29afacc5b7c145a30efe0b87a811a9bb1ec288a4b481ba149fcb53c96bd10fb",
+    "core/__init__.py": "85f8224e9ddcd97eeae064d5179edc4682865f0f834b411ea122e0256f7b6173",
+    "core/encoder.py": "2f24fe4ba38ea516cfa50106e2be13a317972ac23b3e7fbcf950b4ad3934bdd8",
+    "core/families.py": "1906728029b4191fbddac6bc5af7ea78187f824b6948cab002aa0780d4c7a524",
+    "core/model.py": "d21e146ae0bc59475bc6e95be7dc96b13afedeed58b436a2d97c4e78fbc57192",
+    "covariance/__init__.py": "554ef624da125467f89a36b24abbc23ded8d585276399eafc055712a7ca2dabe",
+    "covariance/kernels.py": "436cf40cd0ab12ac77065a865687bc3619877c5e2204f40a11600f7b4fb3806a",
+    "covariance/structures.py": "eb338aa889b106e0652dbd8460d4b98d90ac1aabd3069e114a10a4263bdf0ea3",
+    "layers/__init__.py": "18a7ceb470663810bee8c2c9bfec2e66b4b77101d14d15480f743f6948fee296",
+    "layers/activations.py": "d47229f19706b1407efbf044171896e1c9264d73195d691421e4e88944742a96",
+    "layers/block.py": "fa0972686405c030031995e6026ed37832f0538fda671df2bc8d800aba93c1c9",
+    "layers/noise.py": "9b1d3b614b9bb9f47ab14429037cb6c6c403109e4e2b03db92aeffbbed919d9d",
+    "layers/sem.py": "8c02563305f0504fb473381746f4762ca315cb92109268992ee13fc4bbab448d",
+    "layers/structural.py": "590faf138b960ed4af7cef8c7361006f332244fd4ce25bcbbb80aa6d7ad48b76",
+    "layers/tensor.py": "a974fa828e316251b0dc1933cbb19396508f5a419a5503d293c7fe60634a2b9c",
+    "parsing/__init__.py": "2b794f047a3adb98573b2ebd0bb99914df79b4ae6a21790e1d4116bbee8fdcad",
+    "parsing/dsl.py": "da7aadd2eb2cd1530e988829fd4c25f789b678b7323e02f51d8de79b9d6c16d5",
+    "parsing/formula.py": "df3fda5278335f9d33fcbe9ce3cd9af965d36965cf4ccd232f15e0925bcc7292",
+    "parsing/lavaan_parser.py": "2c2d9f564fda2790ab7798378045400248dd7713132aab32754f9278d8988233",
+    "utils/__init__.py": "0fc08804b8c78cd4ceed339d925f9ebf0313d45d8aa8057bd7ec64cda2bde4bf",
+    "utils/callbacks.py": "ef8c97d3c614d623450760fd2d73695c9757092cd0a0f6d9bde731daba448d77",
+    "utils/constants.py": "048503f53660079c32fa2e4e382da25c2ed21f8045c7cfdd5f3ebbde6bec4d13",
+    "utils/logging_config.py": "8ed6f0a27ae7e19909cb541f95d8a1a74d43ea0cba23a3be1169d6b48d39cf82",
+    "utils/summary.py": "72b21fbc9111f1b2b314ad8cf485cecf3114897c04f9ef0ccc22a612ed70b79d",
+    "utils/validation.py": "bec117f2ee824aa5d256e812ae67f7937db87ae5fcb65d1fa9b55a1f7f0262b0"
   },
   "versions": {
     "torch": "2.5.1",
@@ -266,7 +295,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 0.8203385829983745
+          "seconds": 1.6049639170087175
         },
         {
           "model": "XGBoost",
@@ -276,7 +305,7 @@
             "mae": 20.95511091308594,
             "r2": 0.6539664184461963
           },
-          "seconds": 0.01860362500156043
+          "seconds": 0.020161749998806044
         },
         {
           "model": "RandomForest",
@@ -286,7 +315,7 @@
             "mae": 27.03160456952219,
             "r2": 0.5735629056726277
           },
-          "seconds": 0.08483191700361203
+          "seconds": 0.08684750000247732
         },
         {
           "model": "TabMixNN",
@@ -296,7 +325,7 @@
             "mae": 22.76187135213216,
             "r2": 0.5349760999644686
           },
-          "seconds": 2.7386797919971286,
+          "seconds": 2.603207583000767,
           "training_loss_initial": 4.538296699523926,
           "training_loss_final": 0.8681498169898987,
           "training_loss_last100_mean": 0.6938605612516403
@@ -309,7 +338,7 @@
             "mae": 20.966983904351125,
             "r2": 0.6317656877836499
           },
-          "seconds": 1.8986814579984639,
+          "seconds": 1.7776745419978397,
           "training_loss_initial": 4.582052230834961,
           "training_loss_final": 0.7711072564125061,
           "training_loss_last100_mean": 0.8103606313467026
@@ -322,7 +351,7 @@
             "mae": 20.50221011420356,
             "r2": 0.62481295434177
           },
-          "seconds": 2.0613490420000744,
+          "seconds": 1.792858790999162,
           "training_loss_initial": 4.358466148376465,
           "training_loss_final": 0.645348072052002,
           "training_loss_last100_mean": 0.667262288928032
@@ -335,7 +364,7 @@
             "mae": 38.080180304633245,
             "r2": 0.1722646542532319
           },
-          "seconds": 1.3258010409990675,
+          "seconds": 1.2437078340008156,
           "training_loss_initial": 1.5383400917053223,
           "training_loss_final": 1.2344484329223633,
           "training_loss_last100_mean": 1.2350574254989624
@@ -348,7 +377,7 @@
             "mae": 37.969832980685766,
             "r2": 0.17737036018404073
           },
-          "seconds": 1.272289708002063,
+          "seconds": 1.2508828340069158,
           "training_loss_initial": 1.5722393989562988,
           "training_loss_final": 1.2346014976501465,
           "training_loss_last100_mean": 1.2346906852722168
@@ -361,7 +390,7 @@
             "mae": 37.9230164727105,
             "r2": 0.19010144820640973
           },
-          "seconds": 1.2020245000021532,
+          "seconds": 1.2539321660005953,
           "training_loss_initial": 1.335658311843872,
           "training_loss_final": 1.2372580766677856,
           "training_loss_last100_mean": 1.2372603058815002
@@ -374,7 +403,7 @@
             "mae": 23.1574339328342,
             "r2": 0.6242398768673565
           },
-          "seconds": 0.9793637920010951,
+          "seconds": 1.0126666670112172,
           "training_loss_initial": 1.6519124507904053,
           "training_loss_final": 0.8047558069229126,
           "training_loss_last100_mean": 0.8267678153514862
@@ -387,7 +416,7 @@
             "mae": 22.914972676595045,
             "r2": 0.6263835075022166
           },
-          "seconds": 0.9764649170028861,
+          "seconds": 1.0209304579911986,
           "training_loss_initial": 1.6485886573791504,
           "training_loss_final": 0.8168764710426331,
           "training_loss_last100_mean": 0.8242431819438935
@@ -400,7 +429,7 @@
             "mae": 23.597736039903427,
             "r2": 0.6215824986054845
           },
-          "seconds": 1.0022735840029782,
+          "seconds": 1.0145017920003738,
           "training_loss_initial": 1.6312105655670166,
           "training_loss_final": 0.7821648120880127,
           "training_loss_last100_mean": 0.828124862909317
@@ -637,7 +666,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 0.7037054579996038
+          "seconds": 0.7309334590099752
         },
         {
           "model": "XGBoost",
@@ -647,7 +676,7 @@
             "mae": 25.576546364746097,
             "r2": 0.5503003968713723
           },
-          "seconds": 0.00792024999827845
+          "seconds": 0.00818595899909269
         },
         {
           "model": "RandomForest",
@@ -657,7 +686,7 @@
             "mae": 25.480204478383293,
             "r2": 0.5574803509339905
           },
-          "seconds": 0.07309720900229877
+          "seconds": 0.07446737500140443
         },
         {
           "model": "TabMixNN",
@@ -667,7 +696,7 @@
             "mae": 24.60380734619141,
             "r2": 0.577764289732887
           },
-          "seconds": 1.5875655420022667,
+          "seconds": 1.7675704579887679,
           "training_loss_initial": 3.9411442279815674,
           "training_loss_final": 0.8363355994224548,
           "training_loss_last100_mean": 0.8149366712570191
@@ -680,7 +709,7 @@
             "mae": 25.248899443359377,
             "r2": 0.5601831121952243
           },
-          "seconds": 1.5731748749967664,
+          "seconds": 1.821946084004594,
           "training_loss_initial": 3.9508097171783447,
           "training_loss_final": 0.7695856094360352,
           "training_loss_last100_mean": 0.7417326748371125
@@ -693,7 +722,7 @@
             "mae": 26.817051967773438,
             "r2": 0.4788461224708671
           },
-          "seconds": 1.5464163339929655,
+          "seconds": 1.7812762090034084,
           "training_loss_initial": 3.756265640258789,
           "training_loss_final": 0.6680619716644287,
           "training_loss_last100_mean": 0.687985582947731
@@ -706,7 +735,7 @@
             "mae": 25.53939579101563,
             "r2": 0.5509852362876558
           },
-          "seconds": 1.079830957998638,
+          "seconds": 1.2567692500015255,
           "training_loss_initial": 1.5381908416748047,
           "training_loss_final": 1.2784223556518555,
           "training_loss_last100_mean": 1.278524684906006
@@ -719,7 +748,7 @@
             "mae": 25.51811054321289,
             "r2": 0.5522717361282219
           },
-          "seconds": 1.128335582994623,
+          "seconds": 1.2617570830043405,
           "training_loss_initial": 1.5648170709609985,
           "training_loss_final": 1.2781627178192139,
           "training_loss_last100_mean": 1.2781189429759978
@@ -732,7 +761,7 @@
             "mae": 25.337744790039064,
             "r2": 0.5562310003450264
           },
-          "seconds": 1.0909305830064113,
+          "seconds": 1.2320858750026673,
           "training_loss_initial": 1.3456671237945557,
           "training_loss_final": 1.2781620025634766,
           "training_loss_last100_mean": 1.2783772706985475
@@ -745,7 +774,7 @@
             "mae": 25.30987766357422,
             "r2": 0.5658225245461765
           },
-          "seconds": 0.9655997500012745,
+          "seconds": 1.0318669999978738,
           "training_loss_initial": 1.6169381141662598,
           "training_loss_final": 0.860131561756134,
           "training_loss_last100_mean": 0.8441723066568375
@@ -758,7 +787,7 @@
             "mae": 25.558146523437504,
             "r2": 0.558413651134763
           },
-          "seconds": 0.9842787500019767,
+          "seconds": 1.0227613749884767,
           "training_loss_initial": 1.6242098808288574,
           "training_loss_final": 0.8398147821426392,
           "training_loss_last100_mean": 0.8407577413320542
@@ -771,7 +800,7 @@
             "mae": 25.550410317382816,
             "r2": 0.5585628368524644
           },
-          "seconds": 0.9404824170051143,
+          "seconds": 1.0076472500077216,
           "training_loss_initial": 1.6043365001678467,
           "training_loss_final": 0.8510944247245789,
           "training_loss_last100_mean": 0.8424220484495163
@@ -1412,7 +1441,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 0.701658416997816
+          "seconds": 0.7488902500044787
         },
         {
           "model": "XGBoost",
@@ -1422,7 +1451,7 @@
             "mae": 11.603500739677802,
             "r2": 0.9480122241540089
           },
-          "seconds": 0.02104900000267662
+          "seconds": 0.02176612500625197
         },
         {
           "model": "RandomForest",
@@ -1432,7 +1461,7 @@
             "mae": 20.670805365190045,
             "r2": 0.8242778973120665
           },
-          "seconds": 0.1412473329983186
+          "seconds": 0.14188658400962595
         },
         {
           "model": "TabMixNN",
@@ -1442,7 +1471,7 @@
             "mae": 4.1028863600084,
             "r2": 0.9943468681131797
           },
-          "seconds": 1.79636762500013,
+          "seconds": 1.9755510839895578,
           "training_loss_initial": 2.723226308822632,
           "training_loss_final": -0.6648700833320618,
           "training_loss_last100_mean": -0.5924931228160858
@@ -1455,7 +1484,7 @@
             "mae": 4.219984814837263,
             "r2": 0.9946034641790958
           },
-          "seconds": 1.781892125000013,
+          "seconds": 1.9596612080058549,
           "training_loss_initial": 2.909742593765259,
           "training_loss_final": -0.6467707753181458,
           "training_loss_last100_mean": -0.5486839532852172
@@ -1468,7 +1497,7 @@
             "mae": 4.280748780790742,
             "r2": 0.9947448580150483
           },
-          "seconds": 1.741854833002435,
+          "seconds": 1.9796951249882113,
           "training_loss_initial": 2.726194381713867,
           "training_loss_final": -0.514140248298645,
           "training_loss_last100_mean": -0.6039224374294281
@@ -1481,7 +1510,7 @@
             "mae": 24.685125097528203,
             "r2": 0.7218078235691349
           },
-          "seconds": 1.3516806250045192,
+          "seconds": 1.4517466670076828,
           "training_loss_initial": 1.3282972574234009,
           "training_loss_final": 0.6223952770233154,
           "training_loss_last100_mean": 0.6230975556373596
@@ -1494,7 +1523,7 @@
             "mae": 25.971031935898573,
             "r2": 0.7109798746014491
           },
-          "seconds": 1.324632042000303,
+          "seconds": 1.4688012919941684,
           "training_loss_initial": 1.5219899415969849,
           "training_loss_final": 0.6278290748596191,
           "training_loss_last100_mean": 0.6207293510437012
@@ -1507,7 +1536,7 @@
             "mae": 24.936284765496953,
             "r2": 0.717874650158943
           },
-          "seconds": 1.352773790997162,
+          "seconds": 1.4579265420034062,
           "training_loss_initial": 1.3404358625411987,
           "training_loss_final": 0.6196333765983582,
           "training_loss_last100_mean": 0.6196697664260864
@@ -2148,7 +2177,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 0.7382095830034814
+          "seconds": 0.7320784999901662
         },
         {
           "model": "XGBoost",
@@ -2158,7 +2187,7 @@
             "mae": 24.389391952090794,
             "r2": 0.6592209233880066
           },
-          "seconds": 0.01379504099895712
+          "seconds": 0.01439562501036562
         },
         {
           "model": "RandomForest",
@@ -2168,7 +2197,7 @@
             "mae": 24.40029481132485,
             "r2": 0.6600140818490685
           },
-          "seconds": 0.08513512500212528
+          "seconds": 0.08340250000765081
         },
         {
           "model": "TabMixNN",
@@ -2178,7 +2207,7 @@
             "mae": 24.391817172368366,
             "r2": 0.6729410141589975
           },
-          "seconds": 1.8230913340012194,
+          "seconds": 1.976908500000718,
           "training_loss_initial": 2.3971807956695557,
           "training_loss_final": -0.8007515072822571,
           "training_loss_last100_mean": -0.7282318079471588
@@ -2191,7 +2220,7 @@
             "mae": 23.41694270239936,
             "r2": 0.6909196558392035
           },
-          "seconds": 2.0452335000009043,
+          "seconds": 1.972809500002768,
           "training_loss_initial": 2.5811939239501953,
           "training_loss_final": -0.8045588731765747,
           "training_loss_last100_mean": -0.7177049762010574
@@ -2204,7 +2233,7 @@
             "mae": 23.905792077382404,
             "r2": 0.6854097376260182
           },
-          "seconds": 2.146379582998634,
+          "seconds": 1.9506965830078116,
           "training_loss_initial": 2.3813772201538086,
           "training_loss_final": -0.632207989692688,
           "training_loss_last100_mean": -0.7094960767030716
@@ -2217,7 +2246,7 @@
             "mae": 24.439915974934895,
             "r2": 0.6595458673799486
           },
-          "seconds": 1.5880288330008625,
+          "seconds": 1.462055166994105,
           "training_loss_initial": 1.3346589803695679,
           "training_loss_final": 0.6085683107376099,
           "training_loss_last100_mean": 0.6090321666002274
@@ -2230,7 +2259,7 @@
             "mae": 24.439051972495186,
             "r2": 0.6589689826059812
           },
-          "seconds": 1.5853909580036998,
+          "seconds": 1.472274917003233,
           "training_loss_initial": 1.5223393440246582,
           "training_loss_final": 0.6087818741798401,
           "training_loss_last100_mean": 0.6087959396839142
@@ -2243,7 +2272,7 @@
             "mae": 24.41769348250495,
             "r2": 0.6588137137306069
           },
-          "seconds": 1.330723917002615,
+          "seconds": 1.4492675410001539,
           "training_loss_initial": 1.3376952409744263,
           "training_loss_final": 0.6092103123664856,
           "training_loss_last100_mean": 0.6089199882745743
@@ -2355,7 +2384,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 0.7305792080005631
+          "seconds": 0.7195610000053421
         },
         {
           "model": "XGBoost",
@@ -2365,7 +2394,7 @@
             "mae": 0.6103630701700844,
             "r2": 0.9930828285552141
           },
-          "seconds": 0.010133957999642007
+          "seconds": 0.009945625002728775
         },
         {
           "model": "RandomForest",
@@ -2375,7 +2404,7 @@
             "mae": 2.0506431582306575,
             "r2": 0.8973414953479624
           },
-          "seconds": 0.0729072910035029
+          "seconds": 0.07269279200409073
         },
         {
           "model": "TabMixNN",
@@ -2385,7 +2414,7 @@
             "mae": 0.8271558125813799,
             "r2": 0.9872011800482722
           },
-          "seconds": 1.4203707079941523,
+          "seconds": 1.6527382080093957,
           "training_loss_initial": 3.213034152984619,
           "training_loss_final": -0.11989933252334595,
           "training_loss_last100_mean": -0.07261659771203995
@@ -2398,7 +2427,7 @@
             "mae": 0.9021118164062495,
             "r2": 0.9792738241822285
           },
-          "seconds": 1.4204693749998114,
+          "seconds": 1.6821411669952795,
           "training_loss_initial": 3.331242561340332,
           "training_loss_final": -0.027598649263381958,
           "training_loss_last100_mean": -0.06592231899499894
@@ -2411,7 +2440,7 @@
             "mae": 0.916789118448893,
             "r2": 0.9828315434468247
           },
-          "seconds": 1.3531832090011449,
+          "seconds": 1.6487919579958543,
           "training_loss_initial": 3.2139594554901123,
           "training_loss_final": -0.1932423710823059,
           "training_loss_last100_mean": -0.02994548752903938
@@ -2424,7 +2453,7 @@
             "mae": 4.633333333333333,
             "r2": 0.3363062467701531
           },
-          "seconds": 0.9699616669968236,
+          "seconds": 1.1793841660110047,
           "training_loss_initial": 1.472736120223999,
           "training_loss_final": 1.0167851448059082,
           "training_loss_last100_mean": 1.0168099439144134
@@ -2437,7 +2466,7 @@
             "mae": 4.633333333333333,
             "r2": 0.33629836575269
           },
-          "seconds": 0.9730346249998547,
+          "seconds": 1.1949736660026247,
           "training_loss_initial": 1.591219186782837,
           "training_loss_final": 1.0167851448059082,
           "training_loss_last100_mean": 1.016785124540329
@@ -2450,7 +2479,7 @@
             "mae": 4.633333333333333,
             "r2": 0.3362981589080497
           },
-          "seconds": 1.0047397919988725,
+          "seconds": 1.1815651250071824,
           "training_loss_initial": 1.4660276174545288,
           "training_loss_final": 1.0167850255966187,
           "training_loss_last100_mean": 1.0167850935459137
@@ -2562,7 +2591,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 0.7088907500001369
+          "seconds": 0.7114615419995971
         },
         {
           "model": "XGBoost",
@@ -2572,7 +2601,7 @@
             "mae": 4.47928712632921,
             "r2": 0.642655833843311
           },
-          "seconds": 0.006527249999635387
+          "seconds": 0.006565582996699959
         },
         {
           "model": "RandomForest",
@@ -2582,7 +2611,7 @@
             "mae": 4.594226204626626,
             "r2": 0.6326680810967741
           },
-          "seconds": 0.06808037500013597
+          "seconds": 0.07134900000528432
         },
         {
           "model": "TabMixNN",
@@ -2592,7 +2621,7 @@
             "mae": 3.038169013129339,
             "r2": 0.7948752592446
           },
-          "seconds": 1.3752558329942985,
+          "seconds": 1.6785645830095746,
           "training_loss_initial": 2.811288833618164,
           "training_loss_final": -0.15186285972595215,
           "training_loss_last100_mean": -0.0787617315351963
@@ -2605,7 +2634,7 @@
             "mae": 3.1707842508951813,
             "r2": 0.7726070730377701
           },
-          "seconds": 1.4201940829952946,
+          "seconds": 1.6954210419935407,
           "training_loss_initial": 2.9614241123199463,
           "training_loss_final": 0.4933325946331024,
           "training_loss_last100_mean": -0.2043029060959816
@@ -2618,7 +2647,7 @@
             "mae": 2.8827178107367613,
             "r2": 0.8018392097118823
           },
-          "seconds": 1.4151782499975525,
+          "seconds": 1.663613875003648,
           "training_loss_initial": 2.8582472801208496,
           "training_loss_final": -0.2586389183998108,
           "training_loss_last100_mean": -0.1987896467745304
@@ -2631,7 +2660,7 @@
             "mae": 4.478019375271267,
             "r2": 0.6428519613158994
           },
-          "seconds": 0.9733423750003567,
+          "seconds": 1.194019833987113,
           "training_loss_initial": 1.4662673473358154,
           "training_loss_final": 1.1266237497329712,
           "training_loss_last100_mean": 1.1267104184627532
@@ -2644,7 +2673,7 @@
             "mae": 4.477773963080512,
             "r2": 0.642814432306053
           },
-          "seconds": 0.9748995000045397,
+          "seconds": 1.186497041999246,
           "training_loss_initial": 1.5949413776397705,
           "training_loss_final": 1.1266239881515503,
           "training_loss_last100_mean": 1.1266238284111023
@@ -2657,7 +2686,7 @@
             "mae": 4.47885988023546,
             "r2": 0.642526981085246
           },
-          "seconds": 0.9878460839972831,
+          "seconds": 1.1786052090028534,
           "training_loss_initial": 1.4693058729171753,
           "training_loss_final": 1.1266238689422607,
           "training_loss_last100_mean": 1.1267540967464447
@@ -2948,7 +2977,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 0.7452440420020139
+          "seconds": 0.7214955829986138
         },
         {
           "model": "XGBoost",
@@ -2958,7 +2987,7 @@
             "mae": 1.415470522367038,
             "r2": 0.9526843164999071
           },
-          "seconds": 0.012822999997297302
+          "seconds": 0.012646750008570962
         },
         {
           "model": "RandomForest",
@@ -2968,7 +2997,7 @@
             "mae": 3.5953102751523196,
             "r2": 0.7326208713442455
           },
-          "seconds": 0.09685008399537764
+          "seconds": 0.0961855000059586
         },
         {
           "model": "TabMixNN",
@@ -2978,7 +3007,7 @@
             "mae": 0.640133303128758,
             "r2": 0.9904157092813897
           },
-          "seconds": 1.5775331250042655,
+          "seconds": 1.828147624997655,
           "training_loss_initial": 4.984601974487305,
           "training_loss_final": -0.4363081455230713,
           "training_loss_last100_mean": -0.4052371722459793
@@ -2991,7 +3020,7 @@
             "mae": 0.6364224243164074,
             "r2": 0.9900104394949896
           },
-          "seconds": 1.5741889999990235,
+          "seconds": 1.8581001669954276,
           "training_loss_initial": 5.012662887573242,
           "training_loss_final": -0.4842991232872009,
           "training_loss_last100_mean": -0.4993781679868698
@@ -3004,7 +3033,7 @@
             "mae": 0.6641436532827542,
             "r2": 0.9902217831243596
           },
-          "seconds": 1.5323381249982049,
+          "seconds": 1.8234696669969708,
           "training_loss_initial": 4.798315048217773,
           "training_loss_final": -0.40681737661361694,
           "training_loss_last100_mean": -0.47202201902866364
@@ -3017,7 +3046,7 @@
             "mae": 6.474273141714241,
             "r2": 0.06633634190913773
           },
-          "seconds": 1.0935914579968085,
+          "seconds": 1.2702862909936812,
           "training_loss_initial": 1.5382472276687622,
           "training_loss_final": 1.2754210233688354,
           "training_loss_last100_mean": 1.2754328072071075
@@ -3030,7 +3059,7 @@
             "mae": 6.471015331561749,
             "r2": 0.0682796556408074
           },
-          "seconds": 1.0802886659948854,
+          "seconds": 1.365184499998577,
           "training_loss_initial": 1.5675643682479858,
           "training_loss_final": 1.2755917310714722,
           "training_loss_last100_mean": 1.2756680059432983
@@ -3043,7 +3072,7 @@
             "mae": 6.437500692514273,
             "r2": 0.067553629264121
           },
-          "seconds": 1.07802741699561,
+          "seconds": 1.2871037500008242,
           "training_loss_initial": 1.3449406623840332,
           "training_loss_final": 1.2753974199295044,
           "training_loss_last100_mean": 1.2758271324634551
@@ -3334,7 +3363,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 0.7118292920058593
+          "seconds": 0.7355192079994595
         },
         {
           "model": "XGBoost",
@@ -3344,7 +3373,7 @@
             "mae": 9.852351413302951,
             "r2": -0.6917472794825634
           },
-          "seconds": 0.009415207998245023
+          "seconds": 0.009351333006634377
         },
         {
           "model": "RandomForest",
@@ -3354,7 +3383,7 @@
             "mae": 9.805718232783075,
             "r2": -0.6735716297354017
           },
-          "seconds": 0.0705326250026701
+          "seconds": 0.07400433300063014
         },
         {
           "model": "TabMixNN",
@@ -3364,7 +3393,7 @@
             "mae": 8.71737538655599,
             "r2": -0.35053153000744586
           },
-          "seconds": 1.581118250003783,
+          "seconds": 1.82941383299476,
           "training_loss_initial": 4.218163013458252,
           "training_loss_final": -0.35437214374542236,
           "training_loss_last100_mean": -0.4156630939245224
@@ -3377,7 +3406,7 @@
             "mae": 10.407536632396557,
             "r2": -0.8600560667674646
           },
-          "seconds": 1.5371835409969208,
+          "seconds": 1.833405874989694,
           "training_loss_initial": 4.233953475952148,
           "training_loss_final": -0.5104931592941284,
           "training_loss_last100_mean": -0.482137610912323
@@ -3390,7 +3419,7 @@
             "mae": 9.361549750434028,
             "r2": -0.5275056582245137
           },
-          "seconds": 1.5106203329996788,
+          "seconds": 1.8748567919974448,
           "training_loss_initial": 4.029194355010986,
           "training_loss_final": -0.36329054832458496,
           "training_loss_last100_mean": -0.49293343365192416
@@ -3403,7 +3432,7 @@
             "mae": 9.720875018084492,
             "r2": -0.6323365666772283
           },
-          "seconds": 1.098020124998584,
+          "seconds": 1.3290938749996712,
           "training_loss_initial": 1.5381686687469482,
           "training_loss_final": 1.262687087059021,
           "training_loss_last100_mean": 1.2626872062683105
@@ -3416,7 +3445,7 @@
             "mae": 9.721243489583333,
             "r2": -0.6322088380597404
           },
-          "seconds": 1.0610910830000648,
+          "seconds": 1.2955282920011086,
           "training_loss_initial": 1.5717982053756714,
           "training_loss_final": 1.2626160383224487,
           "training_loss_last100_mean": 1.2626172280311585
@@ -3429,7 +3458,7 @@
             "mae": 9.720978721336083,
             "r2": -0.6323405743960506
           },
-          "seconds": 1.0991752500049188,
+          "seconds": 1.2680376659991452,
           "training_loss_initial": 1.3414850234985352,
           "training_loss_final": 1.2626785039901733,
           "training_loss_last100_mean": 1.262681028842926
@@ -3570,7 +3599,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 0.7400867499964079
+          "seconds": 0.7290532079932746
         },
         {
           "model": "XGBoost",
@@ -3580,7 +3609,7 @@
             "mae": 1.5689965765816825,
             "r2": 0.9872082797169806
           },
-          "seconds": 0.012224124999193009
+          "seconds": 0.011707458004821092
         },
         {
           "model": "RandomForest",
@@ -3590,7 +3619,7 @@
             "mae": 1.473294365249044,
             "r2": 0.9885448440960716
           },
-          "seconds": 0.07055054199736333
+          "seconds": 0.07369745800679084
         },
         {
           "model": "TabMixNN",
@@ -3600,7 +3629,7 @@
             "mae": 0.615298685346331,
             "r2": 0.9979814157660681
           },
-          "seconds": 1.3812155420018826,
+          "seconds": 1.6776942090073135,
           "training_loss_initial": 3.961510181427002,
           "training_loss_final": -1.3314049243927002,
           "training_loss_last100_mean": -1.4856978541612624
@@ -3613,7 +3642,7 @@
             "mae": 0.5215026256016332,
             "r2": 0.9985207193438979
           },
-          "seconds": 1.3730115830039722,
+          "seconds": 1.6689423339994391,
           "training_loss_initial": 4.088674545288086,
           "training_loss_final": -1.418614149093628,
           "training_loss_last100_mean": -1.3505126798152924
@@ -3626,7 +3655,7 @@
             "mae": 0.8589864022391185,
             "r2": 0.9969660527687488
           },
-          "seconds": 1.421163749997504,
+          "seconds": 1.6811145829997258,
           "training_loss_initial": 3.6741743087768555,
           "training_loss_final": -1.1977015733718872,
           "training_loss_last100_mean": -1.5498693835735322
@@ -3639,7 +3668,7 @@
             "mae": 1.4555798121861054,
             "r2": 0.9893682121507662
           },
-          "seconds": 1.0297326669970062,
+          "seconds": 1.1650417920027394,
           "training_loss_initial": 1.53727388381958,
           "training_loss_final": -1.1556895971298218,
           "training_loss_last100_mean": -1.1546363246440887
@@ -3652,7 +3681,7 @@
             "mae": 1.47129014151437,
             "r2": 0.9880679825860275
           },
-          "seconds": 0.9825998329979484,
+          "seconds": 1.1938751249981578,
           "training_loss_initial": 1.6631016731262207,
           "training_loss_final": -1.1468931436538696,
           "training_loss_last100_mean": -1.1519924843311309
@@ -3665,7 +3694,7 @@
             "mae": 1.470177841186524,
             "r2": 0.9871597110707551
           },
-          "seconds": 0.9824736250011483,
+          "seconds": 1.1780737079971004,
           "training_loss_initial": 1.2501612901687622,
           "training_loss_final": -1.1522642374038696,
           "training_loss_last100_mean": -1.1411262702941896
@@ -3806,7 +3835,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 0.7369865000000573
+          "seconds": 0.7353933340054937
         },
         {
           "model": "XGBoost",
@@ -3816,7 +3845,7 @@
             "mae": 1.004951561821831,
             "r2": 0.9968196666999798
           },
-          "seconds": 0.007923625002149493
+          "seconds": 0.007289667002623901
         },
         {
           "model": "RandomForest",
@@ -3826,7 +3855,7 @@
             "mae": 1.0042397189584542,
             "r2": 0.9968150462908109
           },
-          "seconds": 0.06953283300390467
+          "seconds": 0.0725435830099741
         },
         {
           "model": "TabMixNN",
@@ -3836,7 +3865,7 @@
             "mae": 1.4346469158596467,
             "r2": 0.9935110468241459
           },
-          "seconds": 1.397980333000305,
+          "seconds": 1.6580955829995219,
           "training_loss_initial": 3.5660979747772217,
           "training_loss_final": -1.3446857929229736,
           "training_loss_last100_mean": -1.3113104510307312
@@ -3849,7 +3878,7 @@
             "mae": 1.2584045918782554,
             "r2": 0.9955914137901887
           },
-          "seconds": 1.3796121249979478,
+          "seconds": 1.6182534169929568,
           "training_loss_initial": 3.7035698890686035,
           "training_loss_final": -1.5034699440002441,
           "training_loss_last100_mean": -1.52335222363472
@@ -3862,7 +3891,7 @@
             "mae": 1.21377252790663,
             "r2": 0.9954990250410948
           },
-          "seconds": 1.4217462500018883,
+          "seconds": 1.6491175830014981,
           "training_loss_initial": 3.2677135467529297,
           "training_loss_final": -1.6331455707550049,
           "training_loss_last100_mean": -1.2583259530365467
@@ -3875,7 +3904,7 @@
             "mae": 1.0585369237263995,
             "r2": 0.996533691297351
           },
-          "seconds": 0.9900289169963798,
+          "seconds": 1.1849922920082463,
           "training_loss_initial": 1.537621021270752,
           "training_loss_final": -1.0494188070297241,
           "training_loss_last100_mean": -1.0469148862361908
@@ -3888,7 +3917,7 @@
             "mae": 0.9782177395290793,
             "r2": 0.9967894822655056
           },
-          "seconds": 1.0141491249960382,
+          "seconds": 1.199442832992645,
           "training_loss_initial": 1.663283109664917,
           "training_loss_final": -1.0428122282028198,
           "training_loss_last100_mean": -1.0459148705005645
@@ -3901,7 +3930,7 @@
             "mae": 1.1238940217759876,
             "r2": 0.9960252654241716
           },
-          "seconds": 0.9904531670035794,
+          "seconds": 1.1661032080010045,
           "training_loss_initial": 1.2504923343658447,
           "training_loss_final": -1.0316599607467651,
           "training_loss_last100_mean": -1.0340857571363449
@@ -6815,7 +6844,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": "boundary (singular) fit: see help('isSingular')"
           },
-          "seconds": 1.0403419159993064
+          "seconds": 0.975435208005365
         },
         {
           "model": "XGBoost",
@@ -6826,7 +6855,7 @@
             "brier": 0.23584695160388947,
             "log_loss": 0.6650037169456482
           },
-          "seconds": 0.022520292004628573
+          "seconds": 0.021947124987491407
         },
         {
           "model": "RandomForest",
@@ -6837,7 +6866,7 @@
             "brier": 0.24065448333906236,
             "log_loss": 0.678116776856318
           },
-          "seconds": 0.17941275000339374
+          "seconds": 0.19240775000071153
         },
         {
           "model": "TabMixNN",
@@ -6848,7 +6877,7 @@
             "brier": 0.2351444661617279,
             "log_loss": 0.6811724305152893
           },
-          "seconds": 2.7190071669974714,
+          "seconds": 2.985333457996603,
           "training_loss_initial": 0.7316852807998657,
           "training_loss_final": 0.638813316822052,
           "training_loss_last100_mean": 0.6396496951580047
@@ -6862,7 +6891,7 @@
             "brier": 0.2353914976119995,
             "log_loss": 0.6726064085960388
           },
-          "seconds": 2.7319095420025405,
+          "seconds": 3.0211934160033707,
           "training_loss_initial": 0.690597414970398,
           "training_loss_final": 0.6404634714126587,
           "training_loss_last100_mean": 0.6398241198062897
@@ -6876,7 +6905,7 @@
             "brier": 0.24026016891002655,
             "log_loss": 0.7006090879440308
           },
-          "seconds": 2.7514999579943833,
+          "seconds": 2.9888592079951195,
           "training_loss_initial": 0.6966066956520081,
           "training_loss_final": 0.6371198892593384,
           "training_loss_last100_mean": 0.6372883361577988
@@ -6890,7 +6919,7 @@
             "brier": 0.23460908234119415,
             "log_loss": 0.6888936758041382
           },
-          "seconds": 2.2166072500040173,
+          "seconds": 2.406091707991436,
           "training_loss_initial": 0.7015702128410339,
           "training_loss_final": 0.6395063400268555,
           "training_loss_last100_mean": 0.6399168211221695
@@ -6904,7 +6933,7 @@
             "brier": 0.22891177237033844,
             "log_loss": 0.6504947543144226
           },
-          "seconds": 2.279797666997183,
+          "seconds": 2.392438334005419,
           "training_loss_initial": 0.6675063371658325,
           "training_loss_final": 0.6410390138626099,
           "training_loss_last100_mean": 0.6392449265718461
@@ -6918,7 +6947,7 @@
             "brier": 0.2361728996038437,
             "log_loss": 0.7028124332427979
           },
-          "seconds": 2.2775830419996055,
+          "seconds": 2.3827504579967353,
           "training_loss_initial": 0.6742662787437439,
           "training_loss_final": 0.6396416425704956,
           "training_loss_last100_mean": 0.6382093787193298
@@ -9832,7 +9861,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": "boundary (singular) fit: see help('isSingular')"
           },
-          "seconds": 1.0055234169994947
+          "seconds": 0.963808375003282
         },
         {
           "model": "XGBoost",
@@ -9843,7 +9872,7 @@
             "brier": 0.23878304660320282,
             "log_loss": 0.6718911528587341
           },
-          "seconds": 0.02057187500031432
+          "seconds": 0.020659541012719274
         },
         {
           "model": "RandomForest",
@@ -9854,7 +9883,7 @@
             "brier": 0.23888102781858456,
             "log_loss": 0.67303556377523
           },
-          "seconds": 0.1699170830033836
+          "seconds": 0.17256445800012443
         },
         {
           "model": "TabMixNN",
@@ -9865,7 +9894,7 @@
             "brier": 0.24177400767803192,
             "log_loss": 0.6928662061691284
           },
-          "seconds": 2.8927860420008074,
+          "seconds": 3.1299409589992138,
           "training_loss_initial": 0.728705108165741,
           "training_loss_final": 0.6304473280906677,
           "training_loss_last100_mean": 0.6320442444086075
@@ -9879,7 +9908,7 @@
             "brier": 0.24181321263313293,
             "log_loss": 0.6912422180175781
           },
-          "seconds": 2.8627007089962717,
+          "seconds": 3.1074522500130115,
           "training_loss_initial": 0.6805899739265442,
           "training_loss_final": 0.636315643787384,
           "training_loss_last100_mean": 0.6352871346473694
@@ -9893,7 +9922,7 @@
             "brier": 0.24004317820072174,
             "log_loss": 0.6882439255714417
           },
-          "seconds": 2.9511527080030646,
+          "seconds": 3.092439874992124,
           "training_loss_initial": 0.6928456425666809,
           "training_loss_final": 0.6287428736686707,
           "training_loss_last100_mean": 0.6288516050577164
@@ -9907,7 +9936,7 @@
             "brier": 0.2441166490316391,
             "log_loss": 0.7149507403373718
           },
-          "seconds": 2.313409792004677,
+          "seconds": 2.476388000010047,
           "training_loss_initial": 0.7039793729782104,
           "training_loss_final": 0.6324499845504761,
           "training_loss_last100_mean": 0.6325780576467515
@@ -9921,7 +9950,7 @@
             "brier": 0.24190910160541534,
             "log_loss": 0.6929545998573303
           },
-          "seconds": 2.349247583995748,
+          "seconds": 2.554076417000033,
           "training_loss_initial": 0.6641266345977783,
           "training_loss_final": 0.6322397589683533,
           "training_loss_last100_mean": 0.6318749409914016
@@ -9935,7 +9964,7 @@
             "brier": 0.2404928356409073,
             "log_loss": 0.6938750743865967
           },
-          "seconds": 2.3944699589992524,
+          "seconds": 2.4946992920013145,
           "training_loss_initial": 0.6750297546386719,
           "training_loss_final": 0.6316823959350586,
           "training_loss_last100_mean": 0.6301360619068146
@@ -14374,7 +14403,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 5.944840208001551
+          "seconds": 5.639231541994377
         },
         {
           "model": "XGBoost",
@@ -14385,7 +14414,7 @@
             "brier": 0.13796944916248322,
             "log_loss": 0.44013261795043945
           },
-          "seconds": 0.27740329199878033
+          "seconds": 0.28480933399987407
         },
         {
           "model": "RandomForest",
@@ -14396,7 +14425,7 @@
             "brier": 0.10903398451464402,
             "log_loss": 0.35922362925094486
           },
-          "seconds": 1.0262719579986879
+          "seconds": 0.8783388330048183
         },
         {
           "model": "TabMixNN",
@@ -14407,7 +14436,7 @@
             "brier": 0.1057063639163971,
             "log_loss": 0.39275839924812317
           },
-          "seconds": 4.070340790996852,
+          "seconds": 4.144845750008244,
           "training_loss_initial": 2.8075056076049805,
           "training_loss_final": 0.33146533370018005,
           "training_loss_last100_mean": 0.33841354548931124
@@ -14421,7 +14450,7 @@
             "brier": 0.09940403699874878,
             "log_loss": 0.34986332058906555
           },
-          "seconds": 4.251873083005194,
+          "seconds": 4.151299416000256,
           "training_loss_initial": 2.632997512817383,
           "training_loss_final": 0.3376525938510895,
           "training_loss_last100_mean": 0.345041888654232
@@ -14435,7 +14464,7 @@
             "brier": 0.10325165838003159,
             "log_loss": 0.36873650550842285
           },
-          "seconds": 4.434030707998318,
+          "seconds": 4.165073124997434,
           "training_loss_initial": 2.851698875427246,
           "training_loss_final": 0.3541899025440216,
           "training_loss_last100_mean": 0.35095652133226396
@@ -14449,7 +14478,7 @@
             "brier": 0.1699303537607193,
             "log_loss": 0.547163724899292
           },
-          "seconds": 3.4018903330070316,
+          "seconds": 3.2576905419991817,
           "training_loss_initial": 0.7968587279319763,
           "training_loss_final": 0.4233980178833008,
           "training_loss_last100_mean": 0.4235352250933647
@@ -14463,7 +14492,7 @@
             "brier": 0.1697298288345337,
             "log_loss": 0.5439671277999878
           },
-          "seconds": 3.2317132919997675,
+          "seconds": 3.239586625000811,
           "training_loss_initial": 0.6194430589675903,
           "training_loss_final": 0.41992101073265076,
           "training_loss_last100_mean": 0.4211339157819748
@@ -14477,7 +14506,7 @@
             "brier": 0.17091481387615204,
             "log_loss": 0.5591405034065247
           },
-          "seconds": 3.1959373749996303,
+          "seconds": 3.2483652090013493,
           "training_loss_initial": 0.8350037932395935,
           "training_loss_final": 0.4147679805755615,
           "training_loss_last100_mean": 0.41540733754634857
@@ -18916,7 +18945,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 5.721173957994324
+          "seconds": 5.545984541007783
         },
         {
           "model": "XGBoost",
@@ -18927,7 +18956,7 @@
             "brier": 0.1826442927122116,
             "log_loss": 0.548252284526825
           },
-          "seconds": 0.03203208400373114
+          "seconds": 0.031052541991812177
         },
         {
           "model": "RandomForest",
@@ -18938,7 +18967,7 @@
             "brier": 0.19611367064597657,
             "log_loss": 0.6095837660134182
           },
-          "seconds": 0.25626287500199396
+          "seconds": 0.2446834169968497
         },
         {
           "model": "TabMixNN",
@@ -18949,7 +18978,7 @@
             "brier": 0.23415827751159668,
             "log_loss": 0.8893545269966125
           },
-          "seconds": 4.090070040998398,
+          "seconds": 4.089472334002494,
           "training_loss_initial": 2.309962272644043,
           "training_loss_final": 0.3080366551876068,
           "training_loss_last100_mean": 0.312322826385498
@@ -18963,7 +18992,7 @@
             "brier": 0.22347399592399597,
             "log_loss": 0.7927224040031433
           },
-          "seconds": 3.9760266660014167,
+          "seconds": 4.104434292006772,
           "training_loss_initial": 2.1278233528137207,
           "training_loss_final": 0.3199000656604767,
           "training_loss_last100_mean": 0.3147769874334335
@@ -18977,7 +19006,7 @@
             "brier": 0.2337064892053604,
             "log_loss": 0.8990710973739624
           },
-          "seconds": 4.084276500005217,
+          "seconds": 4.16200516698882,
           "training_loss_initial": 2.348843812942505,
           "training_loss_final": 0.3297972083091736,
           "training_loss_last100_mean": 0.3184490352869034
@@ -18991,7 +19020,7 @@
             "brier": 0.2199588418006897,
             "log_loss": 0.8136315941810608
           },
-          "seconds": 3.28997658300068,
+          "seconds": 3.2758975840115454,
           "training_loss_initial": 0.8021765351295471,
           "training_loss_final": 0.4052571952342987,
           "training_loss_last100_mean": 0.4038704553246498
@@ -19005,7 +19034,7 @@
             "brier": 0.21028010547161102,
             "log_loss": 0.7050997018814087
           },
-          "seconds": 3.1531558750066324,
+          "seconds": 3.2095988749933895,
           "training_loss_initial": 0.6149590611457825,
           "training_loss_final": 0.418091356754303,
           "training_loss_last100_mean": 0.41744450241327286
@@ -19019,7 +19048,7 @@
             "brier": 0.20350658893585205,
             "log_loss": 0.673204779624939
           },
-          "seconds": 3.1289743749948684,
+          "seconds": 3.2733375420066295,
           "training_loss_initial": 0.8413880467414856,
           "training_loss_final": 0.4174796938896179,
           "training_loss_last100_mean": 0.4184757322072983
@@ -26675,7 +26704,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 1.4479086669962271
+          "seconds": 1.4233254580030916
         },
         {
           "model": "XGBoost",
@@ -26686,7 +26715,7 @@
             "brier": 0.19704569876194,
             "log_loss": 0.5790226459503174
           },
-          "seconds": 0.3234129580014269
+          "seconds": 0.3336506249906961
         },
         {
           "model": "RandomForest",
@@ -26697,7 +26726,7 @@
             "brier": 0.18347947035327672,
             "log_loss": 0.5485230070161045
           },
-          "seconds": 1.161288584000431
+          "seconds": 1.1941072090121452
         },
         {
           "model": "TabMixNN",
@@ -26708,7 +26737,7 @@
             "brier": 0.16395127773284912,
             "log_loss": 0.5085347294807434
           },
-          "seconds": 7.032426958998258,
+          "seconds": 6.303472875006264,
           "training_loss_initial": 1.4142611026763916,
           "training_loss_final": 0.5161943435668945,
           "training_loss_last100_mean": 0.5111049431562423
@@ -26722,7 +26751,7 @@
             "brier": 0.165041983127594,
             "log_loss": 0.5115407705307007
           },
-          "seconds": 5.682366875000298,
+          "seconds": 6.225349208005355,
           "training_loss_initial": 1.4036567211151123,
           "training_loss_final": 0.5037010312080383,
           "training_loss_last100_mean": 0.5096544998884202
@@ -26736,7 +26765,7 @@
             "brier": 0.16713331639766693,
             "log_loss": 0.516180157661438
           },
-          "seconds": 5.635929584001133,
+          "seconds": 6.255894250003621,
           "training_loss_initial": 1.3984620571136475,
           "training_loss_final": 0.5133026838302612,
           "training_loss_last100_mean": 0.5102034056186676
@@ -26750,7 +26779,7 @@
             "brier": 0.22719387710094452,
             "log_loss": 0.6485152840614319
           },
-          "seconds": 4.825494417003938,
+          "seconds": 5.2152705829939805,
           "training_loss_initial": 0.7447733879089355,
           "training_loss_final": 0.5998966693878174,
           "training_loss_last100_mean": 0.5946967250108719
@@ -26764,7 +26793,7 @@
             "brier": 0.2229246348142624,
             "log_loss": 0.6416088938713074
           },
-          "seconds": 4.743115165998461,
+          "seconds": 5.201079416001448,
           "training_loss_initial": 0.733476996421814,
           "training_loss_final": 0.5968679785728455,
           "training_loss_last100_mean": 0.5969935172796249
@@ -26778,7 +26807,7 @@
             "brier": 0.2217111736536026,
             "log_loss": 0.6377026438713074
           },
-          "seconds": 4.8063113749958575,
+          "seconds": 5.105156750010792,
           "training_loss_initial": 0.7282141447067261,
           "training_loss_final": 0.5946734547615051,
           "training_loss_last100_mean": 0.5949830812215805
@@ -34434,7 +34463,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": ""
           },
-          "seconds": 1.4399638329996378
+          "seconds": 1.4217978329979815
         },
         {
           "model": "XGBoost",
@@ -34445,7 +34474,7 @@
             "brier": 0.23798392713069916,
             "log_loss": 0.6934556365013123
           },
-          "seconds": 0.045660916999622714
+          "seconds": 0.04359145800117403
         },
         {
           "model": "RandomForest",
@@ -34456,7 +34485,7 @@
             "brier": 0.2439789273803158,
             "log_loss": 0.8359097951065365
           },
-          "seconds": 0.33099954100180184
+          "seconds": 0.33063445800507907
         },
         {
           "model": "TabMixNN",
@@ -34467,7 +34496,7 @@
             "brier": 0.2420443445444107,
             "log_loss": 0.7263627648353577
           },
-          "seconds": 5.758069458999671,
+          "seconds": 5.833075791000738,
           "training_loss_initial": 1.24276864528656,
           "training_loss_final": 0.49610117077827454,
           "training_loss_last100_mean": 0.49491437017917633
@@ -34481,7 +34510,7 @@
             "brier": 0.24551066756248474,
             "log_loss": 0.7395235896110535
           },
-          "seconds": 5.538214334002987,
+          "seconds": 5.571326749995933,
           "training_loss_initial": 1.241977334022522,
           "training_loss_final": 0.488200843334198,
           "training_loss_last100_mean": 0.49409872382879255
@@ -34495,7 +34524,7 @@
             "brier": 0.2375592142343521,
             "log_loss": 0.7036226987838745
           },
-          "seconds": 5.725702999996429,
+          "seconds": 5.7652706670050975,
           "training_loss_initial": 1.2359187602996826,
           "training_loss_final": 0.4861735701560974,
           "training_loss_last100_mean": 0.494307664334774
@@ -34509,7 +34538,7 @@
             "brier": 0.22913028299808502,
             "log_loss": 0.6602506637573242
           },
-          "seconds": 4.908632500002568,
+          "seconds": 4.622317167013534,
           "training_loss_initial": 0.7382141351699829,
           "training_loss_final": 0.5886645317077637,
           "training_loss_last100_mean": 0.5884296107292175
@@ -34523,7 +34552,7 @@
             "brier": 0.23035022616386414,
             "log_loss": 0.6686946153640747
           },
-          "seconds": 4.948296458002005,
+          "seconds": 4.646498999994947,
           "training_loss_initial": 0.7383161187171936,
           "training_loss_final": 0.5945630073547363,
           "training_loss_last100_mean": 0.5949641597270966
@@ -34537,7 +34566,7 @@
             "brier": 0.22989895939826965,
             "log_loss": 0.6582291126251221
           },
-          "seconds": 5.047243125001842,
+          "seconds": 4.806681415997446,
           "training_loss_initial": 0.7343960404396057,
           "training_loss_final": 0.592102587223053,
           "training_loss_last100_mean": 0.592441503405571
@@ -37545,7 +37574,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": "boundary (singular) fit: see help('isSingular')"
           },
-          "seconds": 1.0549734590022126
+          "seconds": 0.9836933750048047
         },
         {
           "model": "XGBoost",
@@ -37556,7 +37585,7 @@
             "brier": 0.19308961927890778,
             "log_loss": 0.5657292604446411
           },
-          "seconds": 0.17679729199880967
+          "seconds": 0.16054937499575317
         },
         {
           "model": "RandomForest",
@@ -37567,7 +37596,7 @@
             "brier": 0.21078211049514625,
             "log_loss": 0.6114799382828779
           },
-          "seconds": 0.429299750001519
+          "seconds": 0.3801041249971604
         },
         {
           "model": "TabMixNN",
@@ -37578,7 +37607,7 @@
             "brier": 0.19466708600521088,
             "log_loss": 0.6325461864471436
           },
-          "seconds": 3.2297557499987306,
+          "seconds": 2.987056416008272,
           "training_loss_initial": 2.021545886993408,
           "training_loss_final": 0.437269002199173,
           "training_loss_last100_mean": 0.43600578993558886
@@ -37592,7 +37621,7 @@
             "brier": 0.17392805218696594,
             "log_loss": 0.5872938632965088
           },
-          "seconds": 3.0037864159967285,
+          "seconds": 3.1437865830084775,
           "training_loss_initial": 1.990095853805542,
           "training_loss_final": 0.40471595525741577,
           "training_loss_last100_mean": 0.41283616065979006
@@ -37606,7 +37635,7 @@
             "brier": 0.16904433071613312,
             "log_loss": 0.5462900996208191
           },
-          "seconds": 2.9756201670024893,
+          "seconds": 3.2927904590032995,
           "training_loss_initial": 1.9537432193756104,
           "training_loss_final": 0.44968587160110474,
           "training_loss_last100_mean": 0.4349703538417816
@@ -37620,7 +37649,7 @@
             "brier": 0.23104965686798096,
             "log_loss": 0.7089032530784607
           },
-          "seconds": 2.3506340000021737,
+          "seconds": 2.4571295420028036,
           "training_loss_initial": 0.7810341715812683,
           "training_loss_final": 0.4231854975223541,
           "training_loss_last100_mean": 0.4248488473892212
@@ -37634,7 +37663,7 @@
             "brier": 0.21154533326625824,
             "log_loss": 0.6532446146011353
           },
-          "seconds": 2.287550791996182,
+          "seconds": 2.464478166992194,
           "training_loss_initial": 0.7478962540626526,
           "training_loss_final": 0.40710389614105225,
           "training_loss_last100_mean": 0.4090346568822861
@@ -37648,7 +37677,7 @@
             "brier": 0.23756688833236694,
             "log_loss": 0.7648926973342896
           },
-          "seconds": 2.2962896670069313,
+          "seconds": 2.414335708002909,
           "training_loss_initial": 0.7135101556777954,
           "training_loss_final": 0.3990274965763092,
           "training_loss_last100_mean": 0.4022464111447334
@@ -40656,7 +40685,7 @@
             "R_version": "R version 4.4.1 (2024-06-14)",
             "stderr": "boundary (singular) fit: see help('isSingular')"
           },
-          "seconds": 0.9466132919988013
+          "seconds": 1.009900250006467
         },
         {
           "model": "XGBoost",
@@ -40667,7 +40696,7 @@
             "brier": 0.23012641072273254,
             "log_loss": 0.6717816591262817
           },
-          "seconds": 0.05005508300382644
+          "seconds": 0.04810775000078138
         },
         {
           "model": "RandomForest",
@@ -40678,7 +40707,7 @@
             "brier": 0.23255298179150868,
             "log_loss": 0.6615378443883289
           },
-          "seconds": 0.2773319170009927
+          "seconds": 0.2680883340071887
         },
         {
           "model": "TabMixNN",
@@ -40689,7 +40718,7 @@
             "brier": 0.2547432482242584,
             "log_loss": 1.0427742004394531
           },
-          "seconds": 2.882697334003751,
+          "seconds": 3.02642520799418,
           "training_loss_initial": 1.7492538690567017,
           "training_loss_final": 0.3612024486064911,
           "training_loss_last100_mean": 0.3746673557162285
@@ -40703,7 +40732,7 @@
             "brier": 0.25385183095932007,
             "log_loss": 0.9133087396621704
           },
-          "seconds": 2.85496883399901,
+          "seconds": 2.959005833006813,
           "training_loss_initial": 1.7152796983718872,
           "training_loss_final": 0.37298643589019775,
           "training_loss_last100_mean": 0.38210048884153364
@@ -40717,7 +40746,7 @@
             "brier": 0.2599993348121643,
             "log_loss": 1.0485951900482178
           },
-          "seconds": 2.8974063330024364,
+          "seconds": 3.0051273749995744,
           "training_loss_initial": 1.6807515621185303,
           "training_loss_final": 0.3608868718147278,
           "training_loss_last100_mean": 0.3770126220583916
@@ -40731,7 +40760,7 @@
             "brier": 0.2669890522956848,
             "log_loss": 0.8916289210319519
           },
-          "seconds": 2.2321642079987214,
+          "seconds": 2.3934320420084987,
           "training_loss_initial": 0.781150221824646,
           "training_loss_final": 0.38443446159362793,
           "training_loss_last100_mean": 0.38679556220769884
@@ -40745,7 +40774,7 @@
             "brier": 0.2627408504486084,
             "log_loss": 0.9502763748168945
           },
-          "seconds": 2.2276231670039124,
+          "seconds": 2.3031838750030147,
           "training_loss_initial": 0.7471974492073059,
           "training_loss_final": 0.3734758496284485,
           "training_loss_last100_mean": 0.3746952128410339
@@ -40759,7 +40788,7 @@
             "brier": 0.27100029587745667,
             "log_loss": 0.980362057685852
           },
-          "seconds": 2.263478540997312,
+          "seconds": 2.3519695839931956,
           "training_loss_initial": 0.7134522199630737,
           "training_loss_final": 0.37618470191955566,
           "training_loss_last100_mean": 0.37892041862010956

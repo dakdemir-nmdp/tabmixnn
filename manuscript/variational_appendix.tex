@@ -1,0 +1,94 @@
+\appendix
+\section{Linear equivalence, variational gap and identifiability}
+\label{app:linear}
+
+\subsection{The fixed-covariance Gaussian special case}
+Let $\mathbf y\in\mathbb R^N$, let $\mathbf X$ have full column rank, and consider
+$\mathbf y=\mathbf X\boldsymbol\beta+\mathbf A\mathbf v+\boldsymbol\epsilon$,
+where $\mathbf A=\mathbf Z\mathbf L$, $\mathbf v\sim\N(\mathbf0,\mathbf I)$,
+and $\boldsymbol\epsilon\sim\N(\mathbf0,\sigma_e^2\mathbf I)$ independently.
+Here $\mathbf L$ and $\sigma_e^2>0$ are fixed. There is one scalar response,
+an identity decoder, no centering and no additional penalty. For
+$q(\mathbf v)=\N(\mathbf m,\mathbf D)$ with positive diagonal $\mathbf D$,
+the negative ELBO, up to constants, is
+\begin{equation}
+ \mathcal F=\frac{\|\mathbf y-\mathbf X\boldsymbol\beta-\mathbf A\mathbf m\|^2
+             +\operatorname{tr}(\mathbf A^T\mathbf A\mathbf D)}{2\sigma_e^2}
+       +\frac12\{\mathbf m^T\mathbf m+\operatorname{tr}\mathbf D-\log|\mathbf D|\}.
+\end{equation}
+Differentiating in $\boldsymbol\beta$ and $\mathbf m$ gives
+\begin{equation}
+ \begin{bmatrix}
+ \mathbf X^T\mathbf X & \mathbf X^T\mathbf A\\
+ \mathbf A^T\mathbf X & \mathbf A^T\mathbf A+\sigma_e^2\mathbf I
+ \end{bmatrix}
+ \begin{bmatrix}\widehat{\boldsymbol\beta}\\\widehat{\mathbf m}\end{bmatrix}
+ =\begin{bmatrix}\mathbf X^T\mathbf y\\\mathbf A^T\mathbf y\end{bmatrix}.
+\end{equation}
+These are the Gaussian mixed-model normal equations in innovation coordinates.
+The positive prior precision and full-rank fixed design make this mean problem
+strictly convex. Thus the optimum mean agrees with generalized least squares
+and the conditional random-effect mean at the specified covariance parameters.
+This statement concerns the optimum, not a guarantee that a finite stochastic
+training run attains it.
+
+\subsection{Why matching the mean does not establish ML or REML equivalence}
+For fixed $\boldsymbol\beta$, define
+$\mathbf P=\mathbf I+\mathbf A^T\mathbf A/\sigma_e^2$ and
+$\mathbf h=\mathbf A^T(\mathbf y-\mathbf X\boldsymbol\beta)/\sigma_e^2$.
+The exact conditional posterior is
+$\N(\mathbf P^{-1}\mathbf h,\mathbf P^{-1})$.
+The diagonal variational optimum has the same mean but
+\begin{equation}
+ D_{jj}=P_{jj}^{-1},\qquad
+ \min_q\operatorname{KL}\{q\|p(\mathbf v\mid\mathbf y,\boldsymbol\beta)\}
+ =\frac12\log\frac{\prod_j P_{jj}}{|\mathbf P|}.
+\end{equation}
+The variance identity follows by differentiating
+$\tfrac12\sum_j(P_{jj}D_{jj}-\log D_{jj})$.
+Substitution into the Gaussian KL gives the displayed gap. It is nonnegative
+by the determinant inequality for positive definite matrices and vanishes
+when $\mathbf P$ is diagonal. The gap depends on covariance parameters through
+$\mathbf P$. Optimizing a diagonal ELBO over those parameters therefore need
+not optimize the marginal likelihood. REML additionally accounts for fixed-effect
+estimation and is not implemented by this objective.
+
+For example, with
+\begin{equation}
+ \mathbf P=\begin{bmatrix}2&1\\1&2\end{bmatrix},\quad
+ \mathbf P^{-1}=\frac13\begin{bmatrix}2&-1\\-1&2\end{bmatrix},\quad
+ \mathbf D=\frac12\mathbf I,
+\end{equation}
+the gap is $\tfrac12\log(4/3)$. Each variational marginal variance is $1/2$
+instead of $2/3$. Nevertheless, the variance of $v_1+v_2$ is $1$ under $q$
+and $2/3$ under the exact posterior, whereas for $v_1-v_2$ the corresponding
+variances are $1$ and $2$. Predictive uncertainty can therefore be distorted
+in either direction. The distinction between mean accuracy and covariance
+accuracy is also emphasized by \citet{giordano2018covariances}.
+
+\subsection{A scale invariance in the neural encoder}
+\label{app:scale}
+Consider an uncentered IID encoder with representation
+$\mathbf H=\mathbf X\mathbf W+\mathbf Z\mathbf L\mathbf v$ and a downstream
+learned projection $\mathbf H\mathbf C+\mathbf b$. For any $c>0$, replacing
+$(\mathbf W,\mathbf L,\mathbf C)$ by
+$(c\mathbf W,c\mathbf L,\mathbf C/c)$ leaves every downstream prediction
+unchanged, for every latent draw. Keeping $q(\mathbf v)$ fixed also preserves
+the innovation-space KL. In the absence of scale-breaking penalties this
+preserves the ELBO while changing the encoder prior covariance from
+$\mathbf L\mathbf L^T$ to $c^2\mathbf L\mathbf L^T$.
+The implementation test uses $c=3$ in a nonlinear network and checks both
+predictions and objective values. Thus encoder covariance magnitudes are not
+uniquely identified response-scale variance components. Centering alone does
+not resolve this scale invariance. An identity decoder fixes this particular
+rescaling, but does not establish general identifiability for neural models.
+
+\subsection{Verification coverage}
+The Gaussian normal-equation test checks gradients at an independently solved
+mixed-model optimum. A separate symbolic script verifies the two-dimensional
+mean and variance derivatives and the exact covariance counterexample.
+End-to-end synthetic tests cover fit, prediction, row batching and persistence
+for all ten families; survival tests compare likelihoods and predictions with
+closed forms. These checks establish specified mathematical and software
+contracts. They are not evidence of real-data survival performance, calibrated
+prediction intervals, causal identification or global optimization.

@@ -69,3 +69,13 @@ def test_matched_predictors_and_fixed_only_neural_control():
     model=make_model('y ~ x0','regression',42,1,len(df)).fit(df)
     assert len(model.encoder.config)==0
     assert len(model.encoder.variational_params)==0
+
+
+def test_calibration_identity_and_signed_probability_bias():
+    from experiments.summarize_split_sensitivity import calibration
+    y=np.array([1,0,0,0,1,1,1,0.])
+    p=np.array([.25]*4+[.75]*4)
+    result=calibration(y,p)
+    assert result['converged'] and abs(result['intercept'])<1e-6
+    assert abs(result['slope']-1)<1e-6 and result['mean_probability_error']==0
+    assert sum(b['n'] for b in result['bins'])==len(y)

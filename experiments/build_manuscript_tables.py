@@ -41,7 +41,7 @@ def main():
                     rows.append(key+' & '+' & '.join(cell(r['records'],m,metric) for m in MODELS))
             text=('Regression RMSE in original outcome units (lower is better).' if task=='regression' else 'Classification AUROC (higher is better) and Brier score (lower is better).')
             text+=(' Regime A: observation holdout within known groups.' if regime=='A' else ' Regime B: entirely unseen groups, without labeled support.')
-            text+=r' Neural entries are mean $\pm$ sample SD over three initialization seeds on one fixed split; other methods use one deterministic fit. These SDs are not confidence intervals.'
+            text+=r' Neural entries are mean $\pm$ sample SD over three initialization seeds on one fixed split; other methods use one fit. These SDs are not confidence intervals.'
             header=('Dataset (unit)' if task=='regression' else 'Dataset & Metric')+r' & TabMixNN & Fixed NN & Mixed & XGBoost & RF'
             (out/f'{task}_{regime}_table.tex').write_text(table(text,f'tab:{task}_{regime}',header,rows,'l'*(2 if task=='classification' else 1)+'rrrrr'))
     rows=[]

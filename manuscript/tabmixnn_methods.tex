@@ -68,17 +68,17 @@
 \maketitle
 
 \begin{abstract}
-In this article we describe TabMixNN, a PyTorch implementation of neural prediction models for grouped tabular data. A formula-based encoder combines a fixed-effect design with variational random effects, followed by a neural backbone and outcome-specific heads. The implementation provides eight selectable random-effect covariance structures and ten outcome families, including discrete and continuous survival outcomes. We describe its noncentered variational objective, the dimensions of its encoder, and the sequential static--dynamic structural block used by the default GSEM implementation. Evaluation distinguishes held-out observations from known groups from prediction for entirely unseen groups. Reproducible experiments on five regression and four classification datasets compare TabMixNN with classical mixed models, a fixed-effects neural control, XGBoost and Random Forest. Benefits depend on the prediction setting: random effects improve known-group regression relative to the fixed neural control, whereas performance for unseen groups is mixed. A scalar linear Sleepstudy check gives predictions close to an independently fitted ML mixed model. This agreement does not establish REML equivalence. Single-feature ablations provide descriptive sensitivity summaries, and latent variational draws alone are not full posterior predictive uncertainty.
+In this article we describe TabMixNN, a PyTorch implementation of neural prediction models for grouped tabular data. A formula-based encoder combines a fixed-effect design with variational random effects, followed by a neural backbone and outcome-specific heads. The implementation provides eight selectable random-effect covariance structures and ten outcome families, including discrete and continuous survival outcomes. We describe its noncentered variational objective, the dimensions of its encoder, and the sequential static--dynamic structural block used by the default GSEM implementation. Evaluation distinguishes held-out observations from known groups from prediction for entirely unseen groups. Reproducible experiments over five fixed splits per prediction regime on five regression and four classification datasets compare TabMixNN with classical mixed models, a fixed-effects neural control, XGBoost and Random Forest. Benefits depend on the prediction setting: random effects improve known-group regression relative to the fixed neural control, whereas performance for unseen groups is mixed. Primary-split calibration diagnostics show that the classification probabilities can be too extreme and can underpredict event frequency. A scalar linear Sleepstudy check gives predictions close to an independently fitted ML mixed model. This agreement does not establish REML equivalence. Single-feature ablations provide descriptive sensitivity summaries, and latent variational draws alone are not full posterior predictive uncertainty.
 
 \end{abstract}
 
 \section{Introduction}
 
-Tabular data with hierarchical or grouped structure appears across diverse scientific domains, from longitudinal clinical trials to spatial ecology and genomic studies. Classical statistical approaches, particularly linear mixed-effects models (LMMs) \citep{bates2014fitting, pinheiro2006mixed}, have long been the gold standard for such data, offering interpretable fixed and random effects while accounting for within-group correlation. However, these methods often assume linear relationships and parametric distributions, limiting their applicability to complex, high-dimensional data.
+Grouped tabular data contain both covariate information shared across observations and information specific to subjects, sites or other grouping units. The prediction task matters: a held-out observation from a known subject can use that subject's fitted effects, whereas an entirely new subject has no observed outcomes from which to estimate them. Classical mixed-effects models provide a principled formulation of these distinctions \citep{bates2014fitting, pinheiro2006mixed}. Their linear, generalized and nonlinear variants have different modeling assumptions; a neural model should not be justified by treating all classical mixed models as linear predictors.
 
-Deep learning has revolutionized many domains through its ability to learn complex nonlinear patterns, yet its application to tabular data with mixed-effects structure remains limited. Existing deep learning frameworks for tabular data \citep{gorishniy2021revisiting, arik2021tabnet} typically do not account for hierarchical structure or random effects, while classical mixed-effects implementations \citep{bates2014fitting} lack the representational power of neural networks.
+Combining nonlinear prediction with random effects is established work. LMMNN integrates neural networks with a Gaussian mixed-model likelihood \citep{simchoni2023integrating}; GPBoost combines boosting with Gaussian processes and grouped random effects \citep{sigrist2022gaussian}. TabMixNN addresses an implementation question within this literature: how to expose a common formula interface for latent mixed-effects encoding, alternative neural transformations and several outcome likelihoods. Its innovation-coordinate variational approximation and placement of group effects before the nonlinear decoder distinguish the implementation, but do not establish superiority over existing mixed-effects machine-learning methods.
 
-We introduce TabMixNN (Mixed Effects Neural Networks for Tabular Data), a unified framework that bridges this gap by integrating:
+We introduce TabMixNN (Mixed Effects Neural Networks for Tabular Data), a modular implementation integrating:
 
 \begin{itemize}
     \item \textbf{Mixed-effects modeling}: Variational random effects with flexible covariance structures including autoregressive (AR), kinship, and Gaussian process kernels
@@ -130,11 +130,11 @@ Extensions include:
     \item \textbf{Spatial models}: Gaussian processes, SPDE for spatial correlation \citep{lindgren2011explicit}
 \end{itemize}
 
-Despite their interpretability and statistical rigor, these methods struggle with high-dimensional data and complex nonlinear relationships.
+Classical mixed models remain relevant comparators. Their suitability depends on the specified mean structure, covariance assumptions and computational scale, rather than on a categorical distinction between statistical models and neural networks.
 
 \subsection{Deep Learning for Tabular Data}
 
-Recent deep learning methods for tabular data (e.g., TabNet \citep{arik2021tabnet}, FT-Transformer \citep{gorishniy2021revisiting}, SAINT \citep{somepalli2021saint}, TabPFN \citep{hollmann2023tabpfn}) have shown promise on standard tabular benchmarks. However, these methods do not explicitly model random effects or hierarchical structure, limiting their applicability to grouped/longitudinal data. For such structured data, gradient boosting methods like XGBoost remain the predominant baseline in practice.
+TabNet \citep{arik2021tabnet}, FT-Transformer \citep{gorishniy2021revisiting}, SAINT \citep{somepalli2021saint} and TabPFN \citep{hollmann2023tabpfn} motivate flexible predictors for tabular data. Standard tabular prediction and mixed-effects prediction nevertheless pose different questions about within-group information. LMMNN \citep{simchoni2023integrating} and GPBoost \citep{sigrist2022gaussian} directly address correlated observations. The present experiments compare TabMixNN with a fixed neural control, classical mixed models and conventional tree methods. They do not compare against LMMNN or GPBoost, so they establish neither a state-of-the-art ranking nor a general advantage over methods specifically designed for correlated data.
 
 \subsection{Structural Equation Models and Causal Learning}
 
@@ -150,10 +150,10 @@ Recent work has integrated SEMs with neural networks:
 \begin{itemize}
     \item \textbf{NOTEARS} \citep{zheng2018dags}: Continuous optimization for DAG structure learning
     \item \textbf{DAG-GNN} \citep{yu2019dag}: Graph neural networks with DAG constraints
-    \item \textbf{DeepSEM} \citep{biza2023deep}: Neural networks with structural constraints
+    \item \textbf{Deep structural causal models} \citep{pawlowski2020deep}: Neural components for causal models under specified structural assumptions
 \end{itemize}
 
-TabMixNN extends these ideas by combining structural learning with mixed-effects and flexible outcome modeling.
+TabMixNN uses ordered latent transformations as predictive components. Their triangular form alone does not supply the assumptions needed for causal or counterfactual inference.
 
 \subsection{Spatial-Temporal Deep Learning}
 
@@ -209,7 +209,7 @@ There is one variational row per observed training level. Index zero is reserved
 
 The optional \texttt{enforce\_centering} setting subtracts the training-level mean of transformed effects in both training and prediction. If $\mathbf C$ denotes this projection, the effect covariance becomes $\mathbf C\mathbf\Sigma_t\mathbf C^T$ while the KL remains on the original innovations. This defines a projected latent-variable model; it is not the ordinary unconstrained LMM, and unweighted centering need not make random effects orthogonal to every fixed-effect column in an unbalanced design. Centering is disabled by default.
 
-With a scalar linear identity decoder, a Gaussian outcome, fixed covariance parameters, no centering or extra penalties, and unrestricted variational means, the optimum mean satisfies the Gaussian mixed-model normal equations. The mean-field restriction still affects posterior covariance and can affect jointly estimated variance parameters. TabMixNN does not implement REML. Nonlinear decoders and finite stochastic optimization do not inherit exact BLUP or variance-component recovery guarantees from the linear special case.
+With a scalar linear identity decoder, a Gaussian outcome, fixed covariance parameters, no centering or extra penalties, and unrestricted variational means, the optimum mean satisfies the Gaussian mixed-model normal equations. The mean-field restriction still affects posterior covariance and can affect jointly estimated variance parameters. TabMixNN does not implement REML. Nonlinear decoders and finite stochastic optimization do not inherit exact BLUP or variance-component recovery guarantees from the linear special case. Appendix~\ref{app:linear} derives the normal equations and the covariance-dependent variational gap. It also exhibits a neural rescaling that changes latent covariance magnitudes without changing predictions or the ELBO; thus these magnitudes are not uniquely identified response-scale variance components.
 
 \subsubsection{Covariance Structures}
 
@@ -467,11 +467,11 @@ $h_{it}=\operatorname{sigmoid}(\eta_{it})$. For an observed interval $t_i$ and e
 \begin{equation}
  \sum_{t<t_i}\log(1-h_{it})+d_i\log h_{it_i}+(1-d_i)\log(1-h_{it_i}).
 \end{equation}
-Censoring at $t_i$ therefore includes survival through that interval. Targets contain interval indices and event indicators; interval definitions must be supplied consistently.
+Here $t_i$ is the containing interval for an event, but the last fully completed interval for a censored observation. The supplied time grid contains right endpoints. An event between two endpoints is assigned to the later endpoint; censoring between them contributes survival only through the earlier endpoint. Censoring before the first endpoint contributes zero likelihood information, represented internally by index $-1$. Follow-up beyond the grid is rejected rather than clipped. Log-sigmoid calculations preserve numerical stability without clipping hazards.
 
 \paragraph{9. Discrete-Time Competing Risks}
 For $C$ causes, the head outputs $TC$ logits. A per-interval softmax includes a fixed zero logit for no event and $C$ cause logits. With probabilities $p_{it0},\ldots,p_{itC}$, an event of cause $c_i$ contributes
-$\sum_{t<t_i}\log p_{it0}+\log p_{it_i c_i}$; censoring contributes survival through $t_i$. Causes are mutually exclusive within each interval.
+$\sum_{t<t_i}\log p_{it0}+\log p_{it_i c_i}$; censoring contributes survival through its last completed interval, using the same endpoint convention. Causes are mutually exclusive within each interval. The cumulative incidences and survival probability sum to one at each endpoint.
 
 \paragraph{10. Continuous-Time Survival}
 The implemented continuous family is Weibull proportional hazards. It learns a common shape $k>0$ and scale $\lambda>0$, with a predicted log-hazard ratio $\eta_i$:
@@ -480,6 +480,8 @@ The implemented continuous family is Weibull proportional hazards. It learns a c
  h_i(t)=\frac{k}{t}H_i(t),\qquad
  \log p(t_i,d_i)=d_i\log h_i(t_i)-H_i(t_i).
 \end{equation}
+The survival function is $S_i(t)=\exp\{-H_i(t)\}$ and the conditional median is $\lambda\{\log(2)\exp(-\eta_i)\}^{1/k}$. Prediction at supplied nonnegative times returns survival probabilities; without a time grid the default output is the log-hazard score. A free score intercept and baseline scale are confounded: changing $\lambda$ to $c\lambda$ and adding $k\log c$ to every $\eta_i$ preserves $H_i(t)$. Baseline-scale interpretation therefore requires a reference constraint; the prediction model alone does not identify that decomposition.
+
 These likelihoods assume censoring can be ignored conditional on modeled covariates. Implementation of the survival families does not establish their predictive performance; the experiments below evaluate Gaussian and binomial outcomes.
 
 \subsubsection{Multitask Learning with Output SEM}
@@ -557,7 +559,7 @@ For a known group, prediction uses the transformed variational mean $\widehat{\m
 A separate support/query interface can adapt new IID or UN groups using labeled support observations while freezing the trained network. It minimizes support negative log likelihood plus one half the squared standard-normal innovation norm, i.e., conditional MAP adaptation. Support and query rows must be disjoint and query outcomes must not be used. This is a different evaluation regime from the no-support group holdout reported here.
 
 \subsubsection{Uncertainty Quantification}
-Drawing $\mathbf v_t$ from the fitted variational distribution, transforming it through $\mathbf L_t$, and passing it through the decoder describes latent-induced variation in fitted conditional means. Quantiles of these draws are not full prediction intervals: observation noise, uncertainty in point-estimated network and covariance parameters, and conditional residual variation for related unseen levels are omitted. The experiments report seed variability of prediction metrics and do not claim calibrated posterior predictive coverage.
+Drawing $\mathbf v_t$ from the fitted variational distribution, transforming it through $\mathbf L_t$, and passing it through the decoder describes latent-induced variation in fitted conditional means. Quantiles of these draws are not full prediction intervals: observation noise, uncertainty in point-estimated network and covariance parameters, and conditional residual variation for related unseen levels are omitted. The experiments report initialization and split sensitivity of prediction metrics and do not claim calibrated posterior predictive coverage. The Gaussian example in Appendix~\ref{app:linear} shows why mean-field predictive variance need not be uniformly smaller than exact posterior predictive variance.
 
 \subsection{Model Interpretation}
 \label{sec:interpretation}
@@ -588,7 +590,7 @@ With random slopes the correlation depends on the observations' covariates. With
 
 \subsubsection{Feature Ablation Values}
 
-The \texttt{feature\_ablation\_values} routine replaces one fixed-design column at a time by its mean in a background sample drawn from the supplied frame, then records the prediction difference. Group indices and random-slope design columns remain unchanged. A training frame must therefore be supplied when a training-derived background is intended; the routine does not automatically retrieve one. In the figures we use all training rows as the background.
+The \texttt{feature\_ablation\_values} routine replaces one fixed-design column at a time by its mean in a background sample drawn from the supplied frame, then records the prediction difference. Group indices and random-slope design columns remain unchanged. The optional \texttt{background\_df} argument supplies a separate training reference; otherwise the query frame defines the background. The routine does not automatically retrieve training data. Multitask ablations require an explicit outcome, and vector-valued outputs are rejected until a scalar estimand is specified; summing class probabilities would otherwise create a constant, meaningless attribution. In the figures we use all training rows as the background.
 
 These are descriptive single-column sensitivity measures, not Shapley values: no feature coalitions are averaged and contributions need not sum to the prediction minus a baseline \citep{lundberg2017unified}. In particular, perturbing the fixed Days column while retaining its random-slope input does not estimate a subject's total Days effect or random-slope coefficient. Random-effect ablations instead remove one random term at a time and report group-averaged prediction changes. Such changes may interact and need not be additive. Coalition-based edge attribution is not implemented.
 
@@ -762,11 +764,45 @@ print(model.get_variance_summary())
 
 # Fixed-design sensitivity on a training-derived background
 ablation = model.feature_ablation_values(
-    train_data, background_size=len(train_data)
+    test_data, background_df=train_data,
+    background_size=len(train_data)
 )
 print(ablation['ablation_values'])
 print(model.random_effect_ablations(train_data))
 \end{lstlisting}
+
+\subsection{Target validation and survival prediction}
+Vector outcomes specify an ordered list of response columns, for example
+\begin{lstlisting}[language=Python]
+OutcomeSpec(
+    name='joint', family=MultivariateGaussian(2),
+    y=['y1', 'y2']
+)
+\end{lstlisting}
+A vector row contributes only when all its components are observed. Missing
+scalar outcomes are permitted, but each modeled outcome must have at least
+one fully observed row in each training or supplied validation frame. Infinite
+targets, noninteger counts or class labels, invalid event/cause labels and
+follow-up outside a discrete-time grid are rejected. The model also rejects
+nonfinite design rows and stops on a nonfinite objective or gradient, rather
+than completing an invalid fit.
+
+For a continuous survival specification with \texttt{time} and \texttt{event}
+columns, predictions can be requested as follows:
+\begin{lstlisting}[language=Python]
+survival = model.predict(
+    test_data, outcome='survival',
+    mode='survival', times=[0., 1., 2., 5.]
+)
+median = model.predict(
+    test_data, outcome='survival', mode='median'
+)
+\end{lstlisting}
+The survival result has one row per observation and one column per requested
+time. These are conditional model predictions, not uncertainty intervals.
+Target columns are not read by ordinary prediction. End-to-end tests cover
+all ten families and persistence; analytic tests separately check survival
+likelihoods, censoring boundaries and probability conservation.
 
 \subsection{Model Persistence}
 
@@ -811,18 +847,20 @@ Current limitations and directions for future research include:
     \item \textbf{Uncertainty quantification}: Observation-noise integration, uncertainty in network/covariance parameters and predictive coverage require additional work
     \item \textbf{Non-Euclidean data}: Extensions to graphs, manifolds, and other non-tabular structures
     \item \textbf{Identifiability}: Centering does not identify all latent coordinates, and predictive structural edges do not have a causal interpretation without additional assumptions
-    \item \textbf{Evaluation scope}: One split per regime and three neural seeds do not measure sampling uncertainty. Small group counts, limited baseline tuning and the absence of external validation limit generalization; survival, multitask and spatial/genomic applications are not benchmarked here
+    \item \textbf{Evaluation scope}: Five repeated holdouts and three neural seeds describe split and initialization sensitivity but do not estimate independent sampling uncertainty. Small group counts, limited baseline tuning and the absence of external validation limit generalization; survival, multitask and spatial/genomic applications are not benchmarked here
     \item \textbf{Fairness and privacy}: Incorporation of fairness constraints and differential privacy
 \end{itemize}
 
 \subsection{Conclusion}
 
-TabMixNN combines variational mixed-effects encoding with neural prediction for grouped tabular data. In the nine-dataset evaluation, fitted group effects improve prediction over the fixed neural control on several known-group tasks, while performance for entirely unseen groups varies by dataset. A scalar linear check gives predictions close to an ML mixed model without establishing equivalence of covariance estimates or uncertainty. The implementation supports broader outcome and structural models, but their predictive value requires separate evaluation. Single-feature ablations describe fitted-model sensitivity; they do not identify causal effects.
+TabMixNN combines variational mixed-effects encoding with neural prediction for grouped tabular data. In the nine-dataset evaluation, fitted group effects improve prediction over the fixed neural control on several known-group tasks, while performance for entirely unseen groups varies by dataset. A scalar linear check gives predictions close to an ML mixed model without establishing equivalence of covariance estimates or uncertainty. Classification calibration diagnostics also identify overly extreme probabilities and substantial underprediction on one unseen-group task; discrimination alone does not justify interpreting these outputs as calibrated absolute risks. The implementation supports broader outcome and structural models, but their predictive value requires separate evaluation. Single-feature ablations describe fitted-model sensitivity; they do not identify causal effects.
 
 % \section*{Acknowledgments}
 
 % Acknowledgments will be added
 
+\FloatBarrier
+\input{variational_appendix.tex}
 \FloatBarrier
 \bibliographystyle{plainnat}
 \bibliography{references}

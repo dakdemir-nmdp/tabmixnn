@@ -1,0 +1,22 @@
+\begin{table}[htbp]
+\centering\small
+\caption{Raw-unit RMSE over five fixed repeated holdouts. Each neural split value is the mean metric across three initialization seeds. Entries are mean $\pm$ sample SD across split values. Reused observations and repeated group partitions make these descriptive SDs, not standard errors or confidence intervals.}
+\label{tab:split_regression}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrr}
+\toprule
+Dataset & Regime & TabMixNN & Fixed NN & Mixed & XGBoost & RF \\
+\midrule
+Sleepstudy (ms) & A & $27.058 \pm 5.256$ & $47.695 \pm 3.950$ & $25.727 \pm 4.826$ & $26.666 \pm 3.003$ & $28.927 \pm 5.423$ \\
+Sleepstudy (ms) & B & $40.823 \pm 9.597$ & $39.711 \pm 10.872$ & $38.571 \pm 10.993$ & $39.643 \pm 11.018$ & $39.545 \pm 11.074$ \\
+ChickWeight (g) & A & $6.175 \pm 0.480$ & $36.383 \pm 3.018$ & $29.408 \pm 1.174$ & $16.237 \pm 0.622$ & $28.496 \pm 2.493$ \\
+ChickWeight (g) & B & $38.728 \pm 4.357$ & $38.915 \pm 5.008$ & $39.998 \pm 5.617$ & $38.952 \pm 4.941$ & $38.946 \pm 4.833$ \\
+Machines (score) & A & $1.143 \pm 0.213$ & $5.883 \pm 0.818$ & $3.133 \pm 0.321$ & $1.039 \pm 0.342$ & $2.321 \pm 0.401$ \\
+Machines (score) & B & $4.450 \pm 1.254$ & $5.661 \pm 1.316$ & $5.660 \pm 1.316$ & $5.661 \pm 1.316$ & $5.727 \pm 1.305$ \\
+Oxboys (cm) & A & $0.731 \pm 0.069$ & $8.377 \pm 0.312$ & $0.849 \pm 0.058$ & $1.699 \pm 0.122$ & $4.009 \pm 0.244$ \\
+Oxboys (cm) & B & $9.402 \pm 1.470$ & $9.685 \pm 1.250$ & $9.674 \pm 1.261$ & $9.755 \pm 1.346$ & $9.682 \pm 1.367$ \\
+Loblolly (ft) & A & $0.869 \pm 0.121$ & $2.045 \pm 0.193$ & $2.942 \pm 0.591$ & $1.754 \pm 0.324$ & $2.017 \pm 0.184$ \\
+Loblolly (ft) & B & $1.524 \pm 0.341$ & $1.468 \pm 0.395$ & $2.657 \pm 0.226$ & $1.429 \pm 0.403$ & $1.427 \pm 0.394$ \\
+\bottomrule
+\end{tabular}}
+\end{table}

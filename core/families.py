@@ -49,7 +49,59 @@ class Family(nn.Module):
         raise NotImplementedError
 
     def validate_targets(self, df, target_cols):
-        pass
+        """Validate observed targets before optimization; NaNs denote missingness."""
+        expected = (self.n_tasks if isinstance(self, MultivariateGaussian) else
+                    self.n_labels if isinstance(self, MultiLabelBinomial) else
+                    2 if isinstance(self, (DiscreteTimeSurvival, DiscreteTimeCompetingRisks,
+                                          ContinuousSurvival)) else 1)
+        if len(target_cols) != expected:
+            raise ValueError(f"{type(self).__name__} requires {expected} target columns")
+        try:
+            y = df[target_cols].to_numpy(dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Targets must be numeric; encode class labels explicitly") from exc
+        if np.isinf(y).any():
+            raise ValueError("Targets must be finite or NaN for missing values")
+        observed = y[~np.isnan(y).any(axis=1)]
+        if not len(observed):
+            raise ValueError(f"{type(self).__name__} needs at least one fully observed target row")
+        if isinstance(self, (Binomial, MultiLabelBinomial)):
+            if not np.isin(observed, [0, 1]).all():
+                raise ValueError("Binary targets must be 0 or 1")
+        elif isinstance(self, (Poisson, NegBinomial, Multinomial)):
+            if (observed < 0).any() or (observed != np.floor(observed)).any():
+                raise ValueError("Count/class targets must be nonnegative integers")
+            if isinstance(self, Multinomial) and (observed >= self.n_classes).any():
+                raise ValueError("Class targets must be smaller than n_classes")
+        elif isinstance(self, (DiscreteTimeSurvival, DiscreteTimeCompetingRisks, ContinuousSurvival)):
+            times, labels = observed.T
+            upper = self.num_causes if isinstance(self, DiscreteTimeCompetingRisks) else 1
+            if (labels < 0).any() or (labels > upper).any() or (labels != np.floor(labels)).any():
+                raise ValueError(f"Event/cause targets must be integers from 0 to {upper}")
+            if (times < 0).any() or (isinstance(self, ContinuousSurvival) and (times == 0).any()):
+                raise ValueError("Survival times must be positive (nonnegative for discrete time)")
+            if hasattr(self, 'time_bins') and (times > self.time_bins[-1]).any():
+                raise ValueError("time_bins must cover all observed follow-up; no silent clipping")
+
+
+def _time_grid(time_bins):
+    grid = np.asarray(time_bins, dtype=float)
+    if (grid.ndim != 1 or not len(grid) or not np.isfinite(grid).all()
+            or (grid < 0).any() or (np.diff(grid) <= 0).any()):
+        raise ValueError("time_bins must be finite, nonnegative and strictly increasing")
+    return grid
+
+
+def _discrete_targets(y, n_times, n_causes):
+    if y.ndim != 2 or y.shape[1] != 2 or not torch.isfinite(y).all():
+        raise ValueError("Discrete survival targets must be finite [time_idx, event/cause] rows")
+    if not torch.equal(y, y.floor()):
+        raise ValueError("Discrete survival indices and event/cause labels must be integers")
+    idx, cause = y[:, 0].long(), y[:, 1].long()
+    if ((idx < -1) | (idx >= n_times) | (cause < 0) | (cause > n_causes)
+            | ((idx == -1) & (cause != 0))).any():
+        raise ValueError("Invalid discrete survival index or event/cause label")
+    return idx, cause
 
 class Gaussian(Family):
     def __init__(self, link="identity", init_log_sigma=0.0):
@@ -204,7 +256,7 @@ class NegBinomial(Family):
 class DiscreteTimeSurvival(Family):
     def __init__(self, time_bins):
         super().__init__()
-        self.time_bins = np.array(time_bins)
+        self.time_bins = _time_grid(time_bins)
         self._warned_invalid = False
         self.logger = get_logger("families.discrete_survival")
 
@@ -221,87 +273,30 @@ class DiscreteTimeSurvival(Family):
         return eta
 
     def nll(self, theta, y, **kwargs):
-        # theta: logits h_t
-        # y: expected to have 'time_idx' and 'event' (d)
-        # But here y might be just passed as tensor. 
-        # We need extra info. 
-        # The blueprint says nll(theta, y, **extra).
-        # We assume y is tuple (time_idx, event_status) or tensor with both.
-        # Let's assume y is [batch, 2] where col 0 is time_idx (0..T-1) and col 1 is event (0/1).
-        
-        if y.ndim != 2 or y.shape[1] < 2:
-            raise ValueError("DiscreteTimeSurvival targets must have shape [batch, 2] -> [time_idx, event].")
-        time_idx_raw = y[:, 0].long()
-        event = torch.nan_to_num(y[:, 1], nan=0.0).float()
+        idx, event = _discrete_targets(y, theta.shape[1], 1)
+        interval = torch.arange(theta.shape[1], device=theta.device)[None, :]
+        before = interval < idx[:, None]
+        at = interval == idx[:, None]
+        # log-sigmoid avoids clipping probabilities and preserves tail gradients.
+        ll = (before * F.logsigmoid(-theta)).sum(dim=1)
+        ll = ll + (at * (event[:, None] * F.logsigmoid(theta)
+                        + (1-event[:, None]) * F.logsigmoid(-theta))).sum(dim=1)
+        return -ll.mean()
 
-        batch_size, T = theta.shape
-        # Clip out-of-range times and warn once
-        if (time_idx_raw < 0).any() or (time_idx_raw >= T).any():
-            if not self._warned_invalid:
-                self.logger.warning(
-                    f"time_idx outside [0, {T-1}] encountered; clipping to valid range. "
-                    "Check that time_bins cover the observed follow-up."
-                )
-                self._warned_invalid = True
-            time_idx = time_idx_raw.clamp(min=0, max=T - 1)
-        else:
-            time_idx = time_idx_raw
+    def predict(self, theta, mode="default", **kwargs):
+        if mode in ("default", "survival"):
+            return torch.exp(F.logsigmoid(-theta).cumsum(dim=1)).detach().cpu().numpy()
+        if mode == "hazard":
+            return torch.sigmoid(theta).detach().cpu().numpy()
+        raise ValueError("DiscreteTimeSurvival mode must be survival or hazard")
 
-        # Clamp event indicator to [0,1]
-        if (event < 0).any() or (event > 1).any():
-            if not self._warned_invalid:
-                self.logger.warning("Event indicators outside [0,1] detected; clipping.")
-                self._warned_invalid = True
-            event = torch.clamp(event, 0.0, 1.0)
-        
-        # Range [0, 1, ..., T-1]
-        t_range = torch.arange(T, device=theta.device).unsqueeze(0) # [1, T]
-        
-        # Mask for terms before observed time: t < time_idx
-        mask_before = (t_range < time_idx.unsqueeze(1)).float()
-        
-        # Mask for term at observed time: t == time_idx
-        mask_at = (t_range == time_idx.unsqueeze(1)).float()
-        
-        h = torch.sigmoid(theta)
-        # numerical stability check
-        from ..utils.constants import HAZARD_CLIP_MIN, HAZARD_CLIP_MAX
-        h = torch.clamp(h, HAZARD_CLIP_MIN, HAZARD_CLIP_MAX)
-        
-        # Log terms
-        log_1_minus_h = torch.log(1 - h)
-        log_h = torch.log(h)
-        
-        # Contribution from survival up to time_idx (obs or censored)
-        # For uncensored (d=1) & censored (d=0) we always survive all t < time_idx
-        # loss_part1 = - sum (mask_before * log(1-h))
-        loss_surv_before = -torch.sum(mask_before * log_1_minus_h, dim=1)
-        
-        # Contribution at time_idx
-        # If event (d=1): need h_{i t_i} => - log(h)
-        # If censored (d=0): need 1 - h_{i t_i} => - log(1-h)  (i.e., survived this interval too)
-        
-        # d_i * (-log h) + (1-d_i) * (-log(1-h))
-        loss_at = event * (-torch.sum(mask_at * log_h, dim=1)) + \
-                  (1 - event) * (-torch.sum(mask_at * log_1_minus_h, dim=1))
-                  
-        return (loss_surv_before + loss_at).mean()
-
-    def predict(self, theta, mode="survival", **kwargs):
-        # theta are logits
-        h = torch.sigmoid(theta)
-        surv_cond = 1 - h
-        surv = torch.cumprod(surv_cond, dim=1)
-        # Prepend 1.0 at t=0? Blueprint says S(t) = prod_{s<=t} (1-h_s)
-        # This gives S at end of bin.
-        if mode == "survival":
-            return surv.detach().cpu().numpy()
-        return h.detach().cpu().numpy()
 
 class DiscreteTimeCompetingRisks(Family):
     def __init__(self, time_bins, num_causes):
         super().__init__()
-        self.time_bins = np.array(time_bins)
+        self.time_bins = _time_grid(time_bins)
+        if not isinstance(num_causes, (int, np.integer)) or num_causes < 1:
+            raise ValueError("num_causes must be a positive integer")
         self.num_causes = num_causes # K
         self._warned_invalid = False
         self.logger = get_logger("families.competing_risks")
@@ -322,173 +317,29 @@ class DiscreteTimeCompetingRisks(Family):
         return eta.reshape(-1, n_bins, self.num_causes)
 
     def nll(self, theta, y, **kwargs):
-        # theta: [batch, T, K] logits
-        # y: [batch, 2], time_idx and cause (0=censored, 1..K=causes)
-        
-        if y.ndim != 2 or y.shape[1] < 2:
-            raise ValueError("DiscreteTimeCompetingRisks targets must have shape [batch, 2] -> [time_idx, cause].")
+        idx, cause = _discrete_targets(y, theta.shape[1], self.num_causes)
+        logits = torch.cat([theta.new_zeros(*theta.shape[:2], 1), theta], dim=2)
+        logp = F.log_softmax(logits, dim=2)
+        interval = torch.arange(theta.shape[1], device=theta.device)[None, :]
+        before = interval < idx[:, None]
+        at = interval == idx[:, None]
+        selected = logp.gather(2, cause[:, None, None].expand(-1, theta.shape[1], 1)).squeeze(2)
+        return -((before * logp[:, :, 0]).sum(1) + (at * selected).sum(1)).mean()
 
-        time_idx_raw = y[:, 0].long()
-        cause_raw = y[:, 1].long() # 0 = censored, >0 event type
-        
-        batch_size, T, K = theta.shape
-        if (time_idx_raw < 0).any() or (time_idx_raw >= T).any():
-            if not self._warned_invalid:
-                self.logger.warning(
-                    f"time_idx outside [0, {T-1}] encountered; clipping to valid range. "
-                    "Verify that time_bins span observed follow-up."
-                )
-                self._warned_invalid = True
-            time_idx = time_idx_raw.clamp(min=0, max=T - 1)
+    def predict(self, theta, mode="default", **kwargs):
+        logits = torch.cat([theta.new_zeros(*theta.shape[:2], 1), theta], dim=2)
+        probs = F.softmax(logits, dim=2)
+        survival = probs[:, :, 0].cumprod(dim=1)
+        if mode == "survival":
+            result = survival
+        elif mode == "hazard":
+            result = probs[:, :, 1:]
+        elif mode in ("default", "cif"):
+            previous = torch.cat([theta.new_ones(len(theta), 1), survival[:, :-1]], dim=1)
+            result = (previous[:, :, None] * probs[:, :, 1:]).cumsum(dim=1)
         else:
-            time_idx = time_idx_raw
-
-        if (cause_raw < 0).any() or (cause_raw > K).any():
-            if not self._warned_invalid:
-                self.logger.warning(
-                    f"Cause labels outside [0, {K}] detected; clipping. "
-                    "Expected 0 for censoring and 1..K for causes."
-                )
-                self._warned_invalid = True
-            cause = cause_raw.clamp(min=0, max=K)
-        else:
-            cause = cause_raw
-        
-        # p_{itk} = exp(eta) / (1 + sum exp(eta))
-        # p_{it0} = 1 / (1 + sum exp(eta))
-        
-        # We can treat this as K+1 classes multinomial at each time step where class 0 is "no event yet"
-        # However, the "no event" prob matches 1 / (1+sum...)
-        # We can concat a zero logit for the "no event" class if we want to use log_softmax
-        # Logits: [batch, T, K]
-        # Pad with 0 for the "no-event" class (implicit 0 logit)
-        
-        zeros = torch.zeros(batch_size, T, 1, device=theta.device)
-        all_logits = torch.cat([zeros, theta], dim=2) # [batch, T, K+1] where idx 0 is 'no event'
-        
-        log_probs = F.log_softmax(all_logits, dim=2) # log p_{itc}, c in 0..K
-        
-        # t_range [1, T]
-        t_range = torch.arange(T, device=theta.device).unsqueeze(0)
-        
-        mask_before = (t_range < time_idx.unsqueeze(1)).float()
-        mask_at = (t_range == time_idx.unsqueeze(1)).float()
-        
-        # If t < t_i, we observed outcome 0 (did not fail by any cause)
-        # loss += - log p_{it0}
-        log_p0 = log_probs[:, :, 0]
-        loss_before = -torch.sum(mask_before * log_p0, dim=1)
-        
-        # At t == t_i:
-        # If cause = k > 0: observed k. loss += - log p_{itk}
-        # If cause = 0 (censored): observed 0. loss += - log p_{it0}
-        
-        # We can gather the log prob of the observed cause at each time step
-        # But we only care about the specific cause at time_idx
-        
-        # Broadcast cause to [batch, T] just to select easily? No.
-        
-        # Let's get log probs at time_idx
-        # dimension 1: time_idx
-        # efficient gathering
-        # But `mask_at` is easier.
-        
-        # We want log prob of class `cause` at `time_idx`.
-        # Construct target class indices for 'at' step:
-        # If censored/event, the class index is `cause` (0..K)
-        
-        # log_probs: [batch, T, K+1]
-        # We want to sum -log_prob[batch, t, 0] for t < time_idx
-        # And -log_prob[batch, time_idx, cause] 
-        
-        # One liner validation:
-        # If censored (cause=0), we want p_{it0} at t=time_idx too? 
-        # Blueprint says: if censored at t_tilde: -sum_{t <= t_tilde} log(p_{it0})
-        # My logic above covers this because cause=0 implies selecting index 0 at time_idx.
-        
-        # For the 'at' step:
-        # We need log_probs[., ., cause]
-        # One-hot encode cause? 
-        # cause is [batch]
-        
-        # manual indexing
-        # Select the log_probs for the specific causes at the specific times is tricky with pure masking if we want vectorized
-        # But we can calculate loss for all classes and mask.
-        
-        # log_probs_at_cause = Gather log_probs at index `cause`
-        # index [batch, T] -> cause repeated? No cause is only valid at time_idx.
-        # But for t < time_idx, the observed "class" was 0.
-        
-        # Let's build a target matrix Y_target of shape [batch, T] with class indices.
-        # Initialize with 0.
-        # Set Y_target[i, time_idx[i]] = cause[i]
-        # But wait, for t > time_idx, what is it? We don't care (masked out).
-        
-        Y_target = torch.zeros(batch_size, T, dtype=torch.long, device=theta.device)
-        # Use scatter to set the cause at time_idx
-        # time_idx is [batch]
-        # We need to clamp time_idx to avoid out of bounds if time_idx >= T? 
-        # Assuming time_idx is valid 0..T-1.
-        
-        # We only set value if time_idx < T. If time_idx is T (fully survived?), we might treat differently.
-        # Assuming max time_idx is T-1.
-        
-        Y_target.scatter_(1, time_idx.unsqueeze(1), cause.unsqueeze(1))
-        
-        # Now gather log probs
-        # log_probs [batch, T, K+1]
-        # gather on dim 2
-        picked_log_probs = log_probs.gather(2, Y_target.unsqueeze(2)).squeeze(2) # [batch, T]
-        
-        # Now apply masks
-        # For t < time_idx: we want Y_target=0 (which it is), so picked_log_probs is log p_{it0}
-        # For t == time_idx: we want Y_target=cause, so picked_log_probs is log p_{it,cause}
-        
-        mask_relevant = mask_before + mask_at
-        
-        loss = -torch.sum(mask_relevant * picked_log_probs, dim=1)
-        return loss.mean()
-
-    def predict(self, theta, mode="cif", **kwargs):
-        # theta: [batch, T, K]
-        # CIF calculation
-        batch_size, T, K = theta.shape
-        zeros = torch.zeros(batch_size, T, 1, device=theta.device)
-        all_logits = torch.cat([zeros, theta], dim=2)
-        probs = F.softmax(all_logits, dim=2) # [batch, T, K+1]
-        
-        # p_{itk} is prob of event k at time t, given survival to t-1
-        # S(t-1) probability of surviving up to t-1
-        # Incidence I(t, k) = S(t-1) * p_{itk}
-        # CIF(t, k) = sum_{s<=t} I(s, k)
-        
-        # p_{it0} is prob of surviving interval t given survival to t-1
-        p_surv_interval = probs[:, :, 0] # [batch, T]
-        
-        # S(t) = S(t-1) * p_{it0}
-        # Cumulative product
-        # S(-1) = 1
-        
-        # surv_prob at end of interval t
-        surv_prob = torch.cumprod(p_surv_interval, dim=1)
-        
-        # S_prev for interval t is surv_prob[t-1] (or 1 if t=0)
-        # Shift surv_prob right and prepend 1s
-        ones = torch.ones(batch_size, 1, device=theta.device)
-        S_prev = torch.cat([ones, surv_prob[:, :-1]], dim=1) # [batch, T]
-        
-        # Incidence for each k
-        cifs = []
-        for k in range(1, K+1):
-            p_cond_k = probs[:, :, k]
-            incidence_k = S_prev * p_cond_k
-            cif_k = torch.cumsum(incidence_k, dim=1)
-            cifs.append(cif_k)
-            
-        # Stack [batch, T, K]
-        cifs = torch.stack(cifs, dim=2)
-        
-        return cifs.detach().cpu().numpy()
+            raise ValueError("Competing risks mode must be cif, survival or hazard")
+        return result.detach().cpu().numpy()
 
 
 class MultivariateGaussian(Family):
@@ -640,63 +491,37 @@ class ContinuousSurvival(Family):
         return eta.squeeze(-1)
 
     def nll(self, theta, y, **kwargs):
-        # theta is log_hr: [batch]
-        # y is [batch, 2] -> [time, event]
-        if y.ndim != 2 or y.shape[1] < 2:
-            raise ValueError("ContinuousSurvival targets must have shape [batch, 2] -> [time, event].")
-        t_raw = torch.nan_to_num(y[:, 0], nan=0.0)
-        d_raw = torch.nan_to_num(y[:, 1], nan=0.0)
-        if ((t_raw <= 0) | (d_raw < 0) | (d_raw > 1)).any() and not self._warned_invalid:
-            self.logger.warning("Survival targets contain non-positive times or event labels outside [0,1]; clamping.")
-            self._warned_invalid = True
-        t = torch.clamp(t_raw, min=1e-8)
-        d = torch.clamp(d_raw, 0.0, 1.0)
-        
-        k = torch.exp(self.log_shape)
-        # log_hr shifts the hazard: h(t) = h0(t) * exp(theta)
-        # Weibull h0(t) = (k/λ) * (t/λ)^{k-1}
-        # Weibull H0(t) = (t/λ)^k
-        
-        # We model λ_i such that exp(theta) scales the hazard and cumulative hazard:
-        # H_i(t) = H0(t) * exp(theta) = (t/λ)^k * exp(theta)
-        # log H_i(t) = k(log t - log λ) + theta
-        
-        log_lambda = self.log_scale
-        
-        # Log-cumulative hazard: log H(t)
-        log_H = k * (torch.log(t + 1e-8) - log_lambda) + theta
-        H = torch.exp(log_H)
-        
-        # Log-hazard: log h(t) = log(k/t) + log H(t)
-        log_h = torch.log(k + 1e-8) - torch.log(t + 1e-8) + log_H
-        
-        # NLL = -sum( d_i * log h(t_i) - H(t_i) )
-        log_like = d * log_h - H
-        return -log_like.mean()
+        if (y.ndim != 2 or y.shape[1] != 2 or not torch.isfinite(y).all()
+                or (y[:, 0] <= 0).any() or not ((y[:, 1] == 0) | (y[:, 1] == 1)).all()):
+            raise ValueError("Continuous survival requires positive finite times and binary events")
+        log_t, event = y[:, 0].log(), y[:, 1]
+        log_H = self.log_shape.exp() * (log_t - self.log_scale) + theta.reshape(-1)
+        log_h = self.log_shape - log_t + log_H
+        return (log_H.exp() - event * log_h).mean()
 
-    def predict(self, theta, mode="survival", **kwargs):
-        # theta is log_hr
-        # return S(t) at specified times in kwargs['times']
-        times = kwargs.get('times')
-        if times is None:
-            return theta.detach().cpu().numpy()
-        
-        if isinstance(times, (list, np.ndarray)):
-            times = torch.tensor(times, device=theta.device, dtype=theta.dtype)
-            
-        # [batch, 1, 1] vs [1, n_times, 1] ...
-        # Let's just return median survival if no times provided
-        if mode == "median":
-             # S(t) = 0.5 => H(t) = -log(0.5) = log 2
-             # (t/λ)^k * exp(theta) = log 2
-             # t/λ = (log 2 / exp(theta))^(1/k)
-             # t = λ * (log 2 * exp(-theta))^(1/k)
-             k = torch.exp(self.log_shape)
-             lam = torch.exp(self.log_scale)
-             median = lam * (np.log(2) * torch.exp(-theta))**(1/k)
-             return median.detach().cpu().numpy()
-             
-        return theta.detach().cpu().numpy()
+    def predict(self, theta, mode="default", **kwargs):
+        theta = theta.reshape(-1)
+        if mode in ("default", "log_hazard_ratio"):
+            result = theta
+        elif mode == "risk":
+            result = theta.exp()
+        elif mode == "median":
+            result = (self.log_scale + (np.log(np.log(2.0)) - theta)
+                      / self.log_shape.exp()).exp()
+        elif mode in ("survival", "cumulative_hazard"):
+            if kwargs.get("times") is None:
+                raise ValueError("times is required for survival or cumulative_hazard prediction")
+            times = torch.as_tensor(kwargs['times'], device=theta.device, dtype=theta.dtype)
+            if times.ndim != 1 or not len(times) or not torch.isfinite(times).all() or (times < 0).any():
+                raise ValueError("times must be a nonempty vector of finite nonnegative values")
+            # At t=0 log(t)=-inf, hence H(0)=0 and S(0)=1 exactly.
+            H = (self.log_shape.exp() * (times.log()[None, :] - self.log_scale)
+                 + theta[:, None]).exp()
+            result = (-H).exp() if mode == "survival" else H
+        else:
+            raise ValueError("Unknown ContinuousSurvival prediction mode")
+        return result.detach().cpu().numpy()
+
 
 class Multinomial(Family):
     """

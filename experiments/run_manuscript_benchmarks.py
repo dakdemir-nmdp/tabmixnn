@@ -145,18 +145,19 @@ def classical(train, query, formula, task, regime, work):
     return pred, ref
 
 
-def run_one(cfg, regime, epochs, seeds, output):
+def run_one(cfg, regime, epochs, seeds, output, split_seed=SPLIT_SEED):
     df = load(cfg['loader'])
     cols = cfg['numeric']+cfg['categorical']+[cfg['group'],cfg['outcome']]
     if df[cols].isna().any().any():
         raise ValueError(f"Missing model input in {cfg['name']}; define a training-only policy first")
-    tm,qm = within_group_holdout(df,cfg['group']) if regime=='A' else group_holdout(df,cfg['group'])
+    tm,qm = within_group_holdout(df,cfg['group'],seed=split_seed) if regime=='A' else group_holdout(df,cfg['group'],seed=split_seed)
     train,query,fixed,mixed,ym,ys,transform = prepare(cfg,df,tm,qm)
     known=set(train.g); seen=set(query.g)
     assert seen <= known if regime=='A' else seen.isdisjoint(known)
     actual=query.y.to_numpy()*ys+ym
     records=[]
-    local = DATA_DIR/'manuscript_runs'/f"{cfg['loader']}_{regime}_{epochs}"
+    suffix = '' if split_seed == SPLIT_SEED else f'_split{split_seed}'
+    local = DATA_DIR/'manuscript_runs'/f"{cfg['loader']}_{regime}_{epochs}{suffix}"
     local.mkdir(parents=True,exist_ok=True)
     def record(name, seed, pred, **extra):
         m=metrics(actual,pred,cfg['task'])
@@ -210,14 +211,17 @@ def main():
     ap.add_argument('--seeds',nargs='+',type=int,default=SEEDS)
     ap.add_argument('--output',type=Path,default=ROOT/'experiments/results/manuscript_benchmarks.json')
     ap.add_argument('--resume',action='store_true')
+    ap.add_argument('--split-seed',type=int,default=SPLIT_SEED)
     args=ap.parse_args(); torch.set_num_threads(1); disable_logging()
     if set(args.datasets)-{d['name'] for d in DATASETS}: raise ValueError('Unknown dataset')
     protocol=dict(epochs=args.epochs,seeds=args.seeds,lr=.01,batch='full source-order training batch',
                   hidden=[32],embedding=8,covariance='UN',lambda_kl=1,weight_decay=0,
-                  split_seed=SPLIT_SEED,split_version='manuscript-v1',test_fraction=.25,
+                  split_seed=args.split_seed,split_version='manuscript-v1',test_fraction=.25,
                   tree_group_features='one-hot in A, absent in B',early_stopping=False)
     code_files=['experiments/run_manuscript_benchmarks.py','experiments/mixed_reference.R',
                 'experiments/data_utils.py','experiments/splits.py']
+    code_files += ['__init__.py'] + sorted(str(p.relative_to(ROOT)) for folder in
+        ['core','parsing','covariance','layers','backbones','utils'] for p in (ROOT/folder).glob('*.py'))
     code_hashes={p:hashlib.sha256((ROOT/p).read_bytes()).hexdigest() for p in code_files}
     payload=dict(protocol=protocol,code_hashes=code_hashes,
                  versions={p:importlib.metadata.version(p) for p in ['torch','numpy','pandas','scikit-learn','xgboost','tabmixnn']},results=[])
@@ -228,7 +232,7 @@ def main():
         if cfg['name'] not in args.datasets: continue
         for regime in args.regimes:
             if any(r['dataset']==cfg['name'] and r['regime']==regime for r in payload['results']): continue
-            payload['results'].append(run_one(cfg,regime,args.epochs,args.seeds,args.output))
+            payload['results'].append(run_one(cfg,regime,args.epochs,args.seeds,args.output,args.split_seed))
             args.output.parent.mkdir(parents=True,exist_ok=True)
             args.output.write_text(json.dumps(payload,indent=2,allow_nan=False)+'\n')
     print('Saved',args.output,flush=True)

@@ -546,7 +546,7 @@ class TabMixNN(nn.Module):
             return mapping[name]()
         return fam
         
-    def predict(self, df: pd.DataFrame, outcome: str = None, mode: str = 'default', use_random_effects: bool = True, as_dict: Optional[bool] = None):
+    def predict(self, df: pd.DataFrame, outcome: str = None, mode: str = 'default', use_random_effects: bool = True, as_dict: Optional[bool] = None, **prediction_kwargs):
         """
         Predict outcomes.
 
@@ -557,9 +557,13 @@ class TabMixNN(nn.Module):
             as_dict: If True returns dict; if False returns first/selected output array;
                      if None uses legacy behavior (unwrap single outcome).
         """
+        if self.design is None:
+            raise RuntimeError('Fit the model before prediction')
+        if outcome is not None and self._outcome_idx(outcome) == -1:
+            raise ValueError(f'Unknown outcome: {outcome}')
         self.eval()
-        X, Z_ind, Z_slopes, _ = self.design.transform(df, mode='predict')
-        results = self._predict_batches(X, Z_ind, Z_slopes, mode=mode, use_random_effects=use_random_effects)
+        X, Z_ind, Z_slopes, _ = self.design.transform(df, mode='predict', include_targets=False)
+        results = self._predict_batches(X, Z_ind, Z_slopes, mode=mode, use_random_effects=use_random_effects, prediction_kwargs=prediction_kwargs)
 
         if outcome:
             return results.get(outcome)
@@ -568,7 +572,7 @@ class TabMixNN(nn.Module):
             return list(results.values())[0]
         return results
 
-    def _predict_batches(self, X, Z_ind, Z_slopes, mode="default", use_random_effects: bool = True):
+    def _predict_batches(self, X, Z_ind, Z_slopes, mode="default", use_random_effects: bool = True, prediction_kwargs=None):
         dataset = TabMixDataset(X, Z_ind, Z_slopes, {})
         loader, _ = self._make_dataloader(dataset, shuffle=False)
         buffers: Dict[str, List[torch.Tensor]] = {}
@@ -583,7 +587,7 @@ class TabMixNN(nn.Module):
                         continue
                     family = self.design.outcomes[idx].family
                     theta = family.forward_params(pred_raw)
-                    pred = family.predict(theta, mode=mode)
+                    pred = family.predict(theta, mode=mode, **(prediction_kwargs or {}))
                     if not torch.is_tensor(pred):
                         pred = torch.as_tensor(pred, device=self.device, dtype=torch.float32)
                     buffers.setdefault(name, []).append(pred.detach().cpu().reshape((len(bx),) + tuple(pred.shape[1:])))
@@ -1064,7 +1068,11 @@ class TabMixNN(nn.Module):
 
                 loss = loss + self._structural_penalties()
 
+                if not torch.isfinite(loss):
+                    raise FloatingPointError(f"Nonfinite training objective at epoch {epoch}, batch {i}")
                 loss.backward()
+                if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in self.parameters()):
+                    raise FloatingPointError(f"Nonfinite training gradient at epoch {epoch}, batch {i}")
                 if self.grad_clip_norm > 0:
                     torch.nn.utils.clip_grad_norm_(self.parameters(), self.grad_clip_norm)
                 self.optimizer.step()
@@ -1652,14 +1660,14 @@ class TabMixNN(nn.Module):
             'edge_std': pd.DataFrame()
         }
 
-    def feature_ablation_values(self, df, background_size=50, seed=42):
+    def feature_ablation_values(self, df, background_size=50, seed=42, background_df=None, outcome=None):
         """
         Per-feature mean ablation on the fixed design matrix.
 
         For each feature j, replaces column j with its background mean and records
         the change in prediction.  This is a single-feature marginal ablation, not
-        a Shapley value: it does not average over coalitions and does not satisfy
-        the Shapley axioms.  Use it as a descriptive sensitivity measure only.
+        a Shapley value: it does not average over coalitions and need not yield an additive
+        decomposition of the prediction.  Use it as a descriptive sensitivity measure only.
 
         Strategy:
             - Baseline = mean prediction over a small background sample.
@@ -1667,80 +1675,58 @@ class TabMixNN(nn.Module):
               ablation_ij = pred_i - pred_i_with_feature_j_replaced_by_background_mean.
         """
         if self.design is None:
-            raise RuntimeError("Model design is not initialized. Fit the model before calling shapley_values.")
+            raise RuntimeError("Model design is not initialized. Fit the model before calling feature_ablation_values.")
 
+        if background_size < 1 or int(background_size) != background_size or len(df) == 0:
+            raise ValueError("Ablations require query rows and a positive integer background_size")
+        background_df = df if background_df is None else background_df
+        if len(background_df) == 0:
+            raise ValueError("Ablation background must be nonempty")
+        modes = [(module, module.training) for module in self.modules()]
         self.eval()
-        np.random.seed(seed)
+        rng = np.random.RandomState(seed)
 
-        # Build design matrices
-        X_np, Z_ind_np, Z_slopes_np, _ = self.design.transform(df, mode="predict")
-        X = torch.tensor(X_np, dtype=torch.float32, device=self.device)
-        Z_ind = [torch.tensor(z, dtype=torch.long, device=self.device) for z in Z_ind_np]
-        Z_slopes = [torch.tensor(z, dtype=torch.float32, device=self.device) for z in Z_slopes_np]
+        try:
+            # Build design matrices
+            X_np, Z_ind_np, Z_slopes_np, _ = self.design.transform(df, mode="predict", include_targets=False)
+            X = torch.tensor(X_np, dtype=torch.float32, device=self.device)
+            Z_ind = [torch.tensor(z, dtype=torch.long, device=self.device) for z in Z_ind_np]
+            Z_slopes = [torch.tensor(z, dtype=torch.float32, device=self.device) for z in Z_slopes_np]
 
-        # Feature names from design
-        feature_names = []
-        if self.design.intercept_included:
-            feature_names.append("Intercept")
-        
-        for spec in getattr(self.design, "fixed_cols", []):
-            if spec.get("type") == "numeric":
-                feature_names.append(spec["name"])
-            elif spec.get("type") == "categorical":
-                # Get the actual dummy levels used
-                col_name = spec["name"]
-                if col_name in self.design.categorical_dummy_levels:
-                    levels = self.design.categorical_dummy_levels[col_name]
-                elif col_name in self.design.categorical_levels:
-                    levels = self.design.categorical_levels[col_name]
-                else:
-                    levels = []
-                
-                # Add dummy variable names
-                for lvl in levels:
-                    feature_names.append(f"{col_name}[{lvl}]")
+            feature_names = list(self.design.fixed_feature_names)
+            n_samples, n_features = X.shape
+            # A separate training background keeps query composition from defining
+            # the reference perturbation. The historical default remains df.
+            Xb, zib, zsb, _ = self.design.transform(background_df, include_targets=False)
+            bg_idx = rng.choice(len(background_df), size=min(background_size, len(background_df)), replace=False)
+            X_bg = torch.as_tensor(Xb[bg_idx], dtype=X.dtype, device=self.device)
+            Z_ind_bg = [torch.as_tensor(z[bg_idx], dtype=torch.long, device=self.device) for z in zib]
+            Z_slopes_bg = [torch.as_tensor(z[bg_idx], dtype=X.dtype, device=self.device) for z in zsb]
 
-        n_samples, n_features = X.shape
-        
-        # Ensure feature_names matches X dimensions
-        # This handles cases where categorical encoding creates more/fewer columns than expected
-        if len(feature_names) != n_features:
-            if len(feature_names) < n_features:
-                # Pad with generic names
-                for i in range(len(feature_names), n_features):
-                    feature_names.append(f"Feature_{i}")
-            else:
-                # Truncate (shouldn't happen, but handle it)
-                feature_names = feature_names[:n_features]
-        
-        # Background mean in design space
-        bg_size = min(background_size, n_samples)
-        bg_idx = np.random.choice(n_samples, size=bg_size, replace=False)
-        X_bg = X[bg_idx]
-        Z_ind_bg = [z[bg_idx] for z in Z_ind]
-        Z_slopes_bg = [z[bg_idx] for z in Z_slopes]
+            base_preds = self._predict_from_tensors(X_bg, Z_ind_bg, Z_slopes_bg, outcome=outcome)
+            base_value = float(base_preds.mean())
 
-        base_preds = self._predict_from_tensors(X_bg, Z_ind_bg, Z_slopes_bg)
-        base_value = float(base_preds.mean())
+            # Precompute per-sample original predictions
+            orig_preds = self._predict_from_tensors(X, Z_ind, Z_slopes, outcome=outcome)
 
-        # Precompute per-sample original predictions
-        orig_preds = self._predict_from_tensors(X, Z_ind, Z_slopes)
+            shap_values = torch.zeros((n_samples, n_features), device=self.device)
+            mu_feat = X_bg.mean(dim=0)
 
-        shap_values = torch.zeros((n_samples, n_features), device=self.device)
-        mu_feat = X_bg.mean(dim=0)
+            for j in range(n_features):
+                X_mod = X.clone()
+                X_mod[:, j] = mu_feat[j]
+                preds_mod = self._predict_from_tensors(X_mod, Z_ind, Z_slopes, outcome=outcome)
+                shap_values[:, j] = orig_preds - preds_mod
 
-        for j in range(n_features):
-            X_mod = X.clone()
-            X_mod[:, j] = mu_feat[j]
-            preds_mod = self._predict_from_tensors(X_mod, Z_ind, Z_slopes)
-            shap_values[:, j] = orig_preds - preds_mod
-
-        return {
-            "ablation_values": shap_values.cpu().numpy(),
-            "feature_names": feature_names,
-            "base_value": base_value,
-            "predictions": orig_preds.cpu().numpy(),
-        }
+            return {
+                "ablation_values": shap_values.cpu().numpy(),
+                "feature_names": feature_names,
+                "base_value": base_value,
+                "predictions": orig_preds.cpu().numpy(),
+            }
+        finally:
+            for module, training in modes:
+                module.training = training
 
     def shapley_values(self, df, background_size=50, seed=42):
         """Deprecated: use feature_ablation_values."""
@@ -1781,58 +1767,63 @@ class TabMixNN(nn.Module):
         if self.design is None:
             raise RuntimeError("Model design is not initialized. Fit the model before calling shapley_random_effects.")
 
+        modes = [(module, module.training) for module in self.modules()]
         self.eval()
-        outcome_name = outcome or (self.outcomes[0].name if self.outcomes else "main")
+        try:
+            outcome_name = outcome
 
-        # Transform data
-        X_np, Z_ind_np, Z_slopes_np, _ = self.design.transform(df, mode="predict")
-        X = torch.tensor(X_np, dtype=torch.float32, device=self.device)
-        Z_ind = [torch.tensor(z, dtype=torch.long, device=self.device) for z in Z_ind_np]
-        Z_slopes = [torch.tensor(z, dtype=torch.float32, device=self.device) for z in Z_slopes_np]
+            # Transform data
+            X_np, Z_ind_np, Z_slopes_np, _ = self.design.transform(df, mode="predict")
+            X = torch.tensor(X_np, dtype=torch.float32, device=self.device)
+            Z_ind = [torch.tensor(z, dtype=torch.long, device=self.device) for z in Z_ind_np]
+            Z_slopes = [torch.tensor(z, dtype=torch.float32, device=self.device) for z in Z_slopes_np]
 
-        # Full predictions
-        full_preds = self._predict_from_tensors(X, Z_ind, Z_slopes)
+            # Full predictions
+            full_preds = self._predict_from_tensors(X, Z_ind, Z_slopes, outcome=outcome_name)
 
-        records = []
-        n_samples = len(df)
-        for term_idx, term in enumerate(self.design.random_terms):
-            tid = term.term_id
-            if tid not in self.encoder.variational_params:
-                continue
+            records = []
+            n_samples = len(df)
+            for term_idx, term in enumerate(self.design.random_terms):
+                tid = term.term_id
+                if tid not in self.encoder.variational_params:
+                    continue
 
-            mu_param, log_s_param = self.encoder.variational_params[tid]
-            # Store original mu
-            orig_mu = mu_param.detach().clone()
-            try:
-                # Zero-out mu to ablate term contribution
-                mu_param.data.zero_()
-                preds_ablate = self._predict_from_tensors(X, Z_ind, Z_slopes)
-            finally:
-                mu_param.data.copy_(orig_mu)
+                mu_param, log_s_param = self.encoder.variational_params[tid]
+                # Store original mu
+                orig_mu = mu_param.detach().clone()
+                try:
+                    # Zero-out mu to ablate term contribution
+                    mu_param.data.zero_()
+                    preds_ablate = self._predict_from_tensors(X, Z_ind, Z_slopes, outcome=outcome_name)
+                finally:
+                    mu_param.data.copy_(orig_mu)
 
-            shap_term = (full_preds - preds_ablate).cpu().numpy()
-            baseline = preds_ablate.cpu().numpy()
-            group_col = term.group_col
+                shap_term = (full_preds - preds_ablate).cpu().numpy()
+                baseline = preds_ablate.cpu().numpy()
+                group_col = term.group_col
 
-            # Attempt to recover group id from level_map
-            level_map = getattr(term, "level_map", {})
-            inv_level_map = {v: k for k, v in level_map.items()} if level_map else {}
-            z_indices = Z_ind_np[term_idx] if term_idx < len(Z_ind_np) else np.zeros(n_samples, dtype=int)
+                # Attempt to recover group id from level_map
+                level_map = getattr(term, "level_map", {})
+                inv_level_map = {v: k for k, v in level_map.items()} if level_map else {}
+                z_indices = Z_ind_np[term_idx] if term_idx < len(Z_ind_np) else np.zeros(n_samples, dtype=int)
 
-            for i in range(n_samples):
-                gid_idx = int(z_indices[i])
-                gid_label = inv_level_map.get(gid_idx, gid_idx)
-                records.append({
-                    "sample_id": i,
-                    "term_id": tid,
-                    "group_col": group_col,
-                    "group_id": gid_label,
-                    "ablation_value": shap_term[i],
-                    "baseline": baseline[i],
-                    "prediction": full_preds.cpu().numpy()[i],
-                })
+                for i in range(n_samples):
+                    gid_idx = int(z_indices[i])
+                    gid_label = inv_level_map.get(gid_idx, gid_idx)
+                    records.append({
+                        "sample_id": i,
+                        "term_id": tid,
+                        "group_col": group_col,
+                        "group_id": gid_label,
+                        "ablation_value": shap_term[i],
+                        "baseline": baseline[i],
+                        "prediction": full_preds.cpu().numpy()[i],
+                    })
 
-        return pd.DataFrame(records)
+            return pd.DataFrame(records)
+        finally:
+            for module, training in modes:
+                module.training = training
 
     def shapley_random_effects(self, df, outcome=None):
         """Deprecated: use random_effect_ablations."""
@@ -1844,68 +1835,24 @@ class TabMixNN(nn.Module):
         )
         return self.random_effect_ablations(df, outcome=outcome)
 
-    def _predict_from_tensors(self, X, Z_ind, Z_slopes, use_random_effects: bool = True):
-        """Internal helper: run forward pass and return 1D predictions for ablation methods.
-
-        For survival outcomes, returns Expected Time Lost (ETL) = area under incidence curve.
-        """
+    def _predict_from_tensors(self, X, Z_ind, Z_slopes, use_random_effects: bool = True, outcome=None):
+        """Scalar response for ablations; vector reductions require an explicit estimand."""
+        if outcome is None:
+            if len(self.outcomes) != 1:
+                raise ValueError("Select outcome explicitly for a multitask ablation")
+            outcome = self.outcomes[0].name
+        if self._outcome_idx(outcome) == -1:
+            raise ValueError(f"Unknown outcome: {outcome}")
+        family = self.data_family(outcome)
+        if not isinstance(family, (Gaussian, Binomial, Poisson, NegBinomial, ContinuousSurvival)):
+            raise NotImplementedError("Ablations require a scalar outcome; vector/time-curve reduction is not defined")
         with torch.no_grad():
-            outputs = self.forward(X, Z_ind, Z_slopes, use_random_effects=use_random_effects)
-            outputs_dict = self._ensure_dict_outputs(outputs)
-
-            preds = []
-            for name, pred_raw in outputs_dict.items():
-                idx = self._outcome_idx(name)
-                if idx == -1: continue
-                family = self.design.outcomes[idx].family
-                theta = family.forward_params(pred_raw)
-
-                # Choose prediction mode appropriate to the family
-                if isinstance(family, (DiscreteTimeSurvival, DiscreteTimeCompetingRisks, ContinuousSurvival)):
-                    predict_mode = "survival"
-                elif isinstance(family, (Binomial, Multinomial)):
-                    predict_mode = "proba"
-                else:
-                    predict_mode = "default"
-
-                pred = family.predict(theta, mode=predict_mode)
-                
-                # Force conversion to tensor
-                if not torch.is_tensor(pred):
-                    pred = torch.as_tensor(pred, device=self.device, dtype=torch.float32)
-                
-                # Check for flattened arrays (e.g. 1100 elements for 100 samples)
-                if pred.ndim == 1 and pred.shape[0] > X.shape[0]:
-                    # Attempt to reshape based on X.shape[0] (n_samples)
-                    n_samples = X.shape[0]
-                    if pred.shape[0] % n_samples == 0:
-                        n_bins = pred.shape[0] // n_samples
-                        pred = pred.view(n_samples, n_bins)
-                        # Now it has 2 dims, fall through to ETL logic
-                
-                # For survival families (2D output: samples x time_bins)
-                # Compute ETL = area under incidence curve = sum((1 - S(t)))
-                if pred.ndim > 1:
-                    if pred.shape[0] == X.shape[0]:
-                        # pred is survival curve, compute incidence
-                        incidence = 1.0 - pred
-                        # ETL = area under incidence curve (sum across time bins)
-                        etl = incidence.sum(dim=1)  # Higher ETL = worse outcome = higher risk
-                        pred = etl
-                    else:
-                        self.logger.debug(f"Shape mismatch in SHAP predict! X:{X.shape}, pred:{pred.shape}. Using mean aggregation as fallback.")
-                        # Fallback: flatten?
-                        pred = pred.mean(dim=1)
-                
-                preds.append(pred)
-
-            if preds:
-                # Returns 1D tensor (n_samples,)
-                res = preds[0]
-                if res.ndim > 1:
-                    res = res.flatten()
-                return res
-            return torch.zeros(X.shape[0], device=self.device)
+            outputs = self._ensure_dict_outputs(self.forward(X, Z_ind, Z_slopes,
+                                                use_random_effects=use_random_effects))
+            theta = family.forward_params(outputs[outcome])
+            mode = "proba" if isinstance(family, Binomial) else "default"
+            pred = family.predict(theta, mode=mode)
+            return torch.as_tensor(pred, device=self.device, dtype=torch.float32).reshape(-1)
 
     def shapley_sam_edges(self, layer='output', df=None, n_samples=50, seed=42):
         """Edge attribution is not implemented.

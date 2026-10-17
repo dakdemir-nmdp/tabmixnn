@@ -1,6 +1,6 @@
 {
   "source_sha256": "20922ddc87d538bf2344f73d49000eeb2d7e14934b6191a3e071fefc329942c4",
-  "code_sha256": "5ab3a58e61872aa0fdde000e8898c84905b04594bd93388c34199275b8cda3b7",
+  "code_sha256": "80561dae5ae024c5c84684ccff769d5f657785dbb9758389234dbfb5e9e17fad",
   "seed": 42,
   "epochs": 2000,
   "n_training": 180,
@@ -21,11 +21,46 @@
   },
   "artifacts": {
     "shap_days_effect_per_subject.png": "b5e4fc0341451113ee94899d4c50bb41d5526de23e2bc36387d81448c5efc313",
-    "shap_days_effect_per_subject.pdf": "d8300cfd4ef0730706600c17e12a326d935e6a375fa73ae1f04ee31cf39a8df3",
+    "shap_days_effect_per_subject.pdf": "70484a10aead5d337944d4effe11bc9182042acc66aac08f6086cc98288f47cc",
     "shap_subject_effect_comparison.png": "204d49b4532fbf5bbaff354afb6400aa26c18dcb8f5239cb7e1b18a1528681fe",
-    "shap_subject_effect_comparison.pdf": "e510b6ad2a907f0a9a0e0b0b6115e3f3fa3211105e35f0c70192fe0a31cb852e",
+    "shap_subject_effect_comparison.pdf": "319cfce6dbebef47b2e75da5e1dcf53f7af54e16f8163bb88013d2840c9a2810",
     "shap_waterfall_subjects.png": "54d82093a394a700e1f121d079cfd9aab343f31c26d57e02ac3914900aad7cfa",
-    "shap_waterfall_subjects.pdf": "1cbd763d1bd2e4dcee2c23d0d1ba2a9c156fea545dc9a416c13a60437cc38230"
+    "shap_waterfall_subjects.pdf": "8790c566d72e6962c2f691d24347e9b5c35115c9313f150b81d729588885d4ff"
   },
-  "api_perturbation_check": "passed"
+  "api_perturbation_check": "passed",
+  "model_code_hashes": {
+    "experiments/run_manuscript_benchmarks.py": "6df9e9f2272007c92c317c471edc3f9600764cd33c748dda36f24154bcb7698c",
+    "experiments/mixed_reference.R": "c17c08940baa429a0a0666f083a7d9ed248a13229647e0f61529098a04db5e38",
+    "experiments/data_utils.py": "11068fedc32392fcb97aadd66ca0dc67d160338a81c0cfa3cdfae8cd2d76c6c6",
+    "experiments/splits.py": "6001bff74845ee669d69d67e2b237e9810b6a6994d1a4dfc3823229aa58fd131",
+    "__init__.py": "2bc8c32a3a38bb9fab88c97153bd38d56a7b0bae9fd0f44ce709bb60521009fc",
+    "backbones/__init__.py": "410c574461edd033db3659a63659fbbc13cd6d9052f493144f7388d1ef8ad83a",
+    "backbones/base.py": "7635804098c73465666b946d16a4adadc59e574216a16ba2396cc6fdc257f84c",
+    "backbones/gsem.py": "c42d1fa72d18546679bd211b07a11b9caf23fe0bb8b98178588ebb383262fd15",
+    "backbones/manifold.py": "c29afacc5b7c145a30efe0b87a811a9bb1ec288a4b481ba149fcb53c96bd10fb",
+    "core/__init__.py": "85f8224e9ddcd97eeae064d5179edc4682865f0f834b411ea122e0256f7b6173",
+    "core/encoder.py": "2f24fe4ba38ea516cfa50106e2be13a317972ac23b3e7fbcf950b4ad3934bdd8",
+    "core/families.py": "1906728029b4191fbddac6bc5af7ea78187f824b6948cab002aa0780d4c7a524",
+    "core/model.py": "d21e146ae0bc59475bc6e95be7dc96b13afedeed58b436a2d97c4e78fbc57192",
+    "covariance/__init__.py": "554ef624da125467f89a36b24abbc23ded8d585276399eafc055712a7ca2dabe",
+    "covariance/kernels.py": "436cf40cd0ab12ac77065a865687bc3619877c5e2204f40a11600f7b4fb3806a",
+    "covariance/structures.py": "eb338aa889b106e0652dbd8460d4b98d90ac1aabd3069e114a10a4263bdf0ea3",
+    "layers/__init__.py": "18a7ceb470663810bee8c2c9bfec2e66b4b77101d14d15480f743f6948fee296",
+    "layers/activations.py": "d47229f19706b1407efbf044171896e1c9264d73195d691421e4e88944742a96",
+    "layers/block.py": "fa0972686405c030031995e6026ed37832f0538fda671df2bc8d800aba93c1c9",
+    "layers/noise.py": "9b1d3b614b9bb9f47ab14429037cb6c6c403109e4e2b03db92aeffbbed919d9d",
+    "layers/sem.py": "8c02563305f0504fb473381746f4762ca315cb92109268992ee13fc4bbab448d",
+    "layers/structural.py": "590faf138b960ed4af7cef8c7361006f332244fd4ce25bcbbb80aa6d7ad48b76",
+    "layers/tensor.py": "a974fa828e316251b0dc1933cbb19396508f5a419a5503d293c7fe60634a2b9c",
+    "parsing/__init__.py": "2b794f047a3adb98573b2ebd0bb99914df79b4ae6a21790e1d4116bbee8fdcad",
+    "parsing/dsl.py": "da7aadd2eb2cd1530e988829fd4c25f789b678b7323e02f51d8de79b9d6c16d5",
+    "parsing/formula.py": "df3fda5278335f9d33fcbe9ce3cd9af965d36965cf4ccd232f15e0925bcc7292",
+    "parsing/lavaan_parser.py": "2c2d9f564fda2790ab7798378045400248dd7713132aab32754f9278d8988233",
+    "utils/__init__.py": "0fc08804b8c78cd4ceed339d925f9ebf0313d45d8aa8057bd7ec64cda2bde4bf",
+    "utils/callbacks.py": "ef8c97d3c614d623450760fd2d73695c9757092cd0a0f6d9bde731daba448d77",
+    "utils/constants.py": "048503f53660079c32fa2e4e382da25c2ed21f8045c7cfdd5f3ebbde6bec4d13",
+    "utils/logging_config.py": "8ed6f0a27ae7e19909cb541f95d8a1a74d43ea0cba23a3be1169d6b48d39cf82",
+    "utils/summary.py": "72b21fbc9111f1b2b314ad8cf485cecf3114897c04f9ef0ccc22a612ed70b79d",
+    "utils/validation.py": "bec117f2ee824aa5d256e812ae67f7937db87ae5fcb65d1fa9b55a1f7f0262b0"
+  }
 }

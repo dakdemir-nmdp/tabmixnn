@@ -26,8 +26,7 @@ def main():
     train,_,_,formula,ym,ys,_=prepare(DATASETS[0],df,allrows,allrows)
     model=make_model(formula,'regression',42,2000,len(train)).fit(train)
     values=model.feature_ablation_values(train,background_size=len(train),seed=42)
-    # Use authoritative compiled-design names; API display labels may be generic.
-    j=model.design.design_info.column_names.index('x0')
+    j=values['feature_names'].index('x0')
     delta=values['ablation_values'][:,j]*ys
     assert np.isfinite(delta).all()
     # Independent check of the actual API perturbation and outcome rescaling.
@@ -85,6 +84,7 @@ def main():
         example_days=[0,5,9],subject_labels='anonymous source-order numbers 1 through 18',
         slope_summary=dict(mean=float(np.mean(slopes)),minimum=min(slopes),maximum=max(slopes)),
         artifacts=hashes,api_perturbation_check='passed')
+    meta['model_code_hashes']=json.loads((ROOT/'experiments/results/manuscript_benchmarks.json').read_text())['code_hashes']
     (ROOT/'experiments/results/manuscript_figures.json').write_text(json.dumps(meta,indent=2)+'\n')
     print(json.dumps(meta,indent=2))
 

@@ -30,7 +30,7 @@ uv pip install --python .venv/bin/python statsmodels scipy xgboost matplotlib
 `--resume` skips completed dataset/regime pairs only after exact protocol and
 benchmark-source-hash checks. `--datasets Sleepstudy --epochs 5 --seeds 42
 --output experiments/data/smoke.json` is a smoke run, not a manuscript run.
-Canonical tables require all 18 dataset/regime pairs and the separate ablations.
+Primary tables require all 18 dataset/regime pairs and the separate ablations.
 
 ## Protocol
 
@@ -83,3 +83,62 @@ not generate the revised manuscript tables, and their results must not be
 pooled with this suite. Unsupported historical Abalone/other benchmark rows
 are excluded from the revised manuscript. Multitask and survival interfaces
 are described as implemented capabilities, not empirically validated here.
+
+## Deep revision: split sensitivity and mathematical checks
+
+The primary analysis retains split seed 20261015. An exploratory extension,
+specified after the primary analysis, fixes four additional seeds before
+executing their fits. All five splits use the same three neural seeds, training
+budget and comparator settings. No result is selected by performance.
+
+```sh
+for split_seed in 20261016 20261017 20261018 20261019; do
+  .venv/bin/python experiments/run_manuscript_benchmarks.py \
+    --split-seed "$split_seed" \
+    --output "experiments/results/manuscript_split_${split_seed}.json"
+done
+.venv/bin/python experiments/summarize_split_sensitivity.py
+.venv/bin/python experiments/verify_variational_identities.py
+```
+
+The summary script independently reconstructs every metric from the ignored
+local prediction files, then generates two split-sensitivity tables and one
+calibration table. Neural metrics are averaged over initializations within
+split before summarizing over splits. Overlapping holdouts and repeated small-
+group partitions prevent interpreting split SDs as independent standard errors.
+Calibration intercept/slope and bin summaries use held-out predictions only
+for evaluation, not for recalibration or model selection. The symbolic script
+requires SymPy; its output is an explicit finite-dimensional algebra check,
+not a formal proof of all model properties.
+
+Every benchmark file now records hashes of the model source modules as well
+as experiment scripts. The primary 168 model records were rerun after the
+API repairs; no metric changed by more than 1e-7 from session 89.
+
+One VerbAgg-A reference fit for split 20261018 encountered lme4's
+`Downdated VtV is not positive definite` error inside the combined runner.
+The identical independent R command converged on byte-identical prepared CSVs.
+The transparent execution workaround is:
+
+```sh
+.venv/bin/python experiments/resume_verified_reference.py \
+  --dataset VerbAgg --regime A --split-seed 20261018 \
+  --output experiments/results/manuscript_split_20261018.json
+.venv/bin/python experiments/run_manuscript_benchmarks.py \
+  --split-seed 20261018 --output experiments/results/manuscript_split_20261018.json --resume
+```
+
+This helper independently executes the original R fit, requires convergence,
+verifies regenerated input hashes and replays its predictions without changing
+optimizer settings or selecting by test performance. Provenance is stored in
+that model record. Use it only for an interrupted pair with its prepared CSVs
+still present; completed pairs are not overwritten. The cause of the runner-
+dependent numerical behavior has not been isolated.
+
+After execution, fourteen whitespace-only blank lines in `core/model.py` were
+cleaned. `results/source_equivalence.json` preserves both SHA-256 hashes and
+the exact line replacements needed to reconstruct the executed source from
+the delivered file. Their Python syntax trees are identical; no functional
+model change followed the runs. Execution hashes are retained unchanged.
+A strict `--resume` against these completed records requires the reconstructed
+executed file; a fresh reproduction uses the delivered source.

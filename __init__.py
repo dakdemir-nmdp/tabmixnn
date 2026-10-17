@@ -24,7 +24,7 @@ from .parsing.formula import OutcomeSpec
 from .core.families import (
     Gaussian, Binomial, Poisson, NegBinomial, 
     DiscreteTimeSurvival, DiscreteTimeCompetingRisks,
-    MultivariateGaussian, MultiLabelBinomial, ContinuousSurvival
+    MultivariateGaussian, MultiLabelBinomial, ContinuousSurvival, Multinomial
 )
 from .utils.logging_config import set_log_level, disable_logging, enable_logging
 from .utils.summary import summary, parameter_estimates
@@ -60,6 +60,7 @@ __all__ = [
     "MultivariateGaussian",
     "MultiLabelBinomial",
     "ContinuousSurvival",
+    "Multinomial",
     
     # Utilities
     "set_log_level",
