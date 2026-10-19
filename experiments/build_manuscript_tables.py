@@ -23,7 +23,7 @@ def table(caption,label,header,rows,spec):
 def main():
     payload=json.loads((ROOT/'experiments/results/manuscript_benchmarks.json').read_text())
     results=payload['results']
-    if len(results)!=18: raise ValueError('Require all nine datasets and both regimes')
+    if len(results)!=20: raise ValueError('Require all ten datasets and both regimes')
     out=ROOT/'manuscript'; rows=[]
     for a in [r for r in results if r['regime']=='A']:
         b=next(r for r in results if r['dataset']==a['dataset'] and r['regime']=='B')

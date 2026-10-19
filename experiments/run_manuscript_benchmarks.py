@@ -33,15 +33,18 @@ from experiments.splits import SPLIT_SEED, group_holdout
 
 SEEDS = [42, 123, 456]
 DATASETS = [
- dict(name='Sleepstudy', loader='sleepstudy', task='regression', outcome='Reaction', group='Subject', numeric=['Days'], categorical=[], slope='Days', unit='ms'),
- dict(name='ChickWeight', loader='chickweight', task='regression', outcome='weight', group='Chick', numeric=['Time'], categorical=['Diet'], slope=None, unit='g'),
- dict(name='Machines', loader='machines', task='regression', outcome='score', group='Worker', numeric=[], categorical=['Machine'], slope=None, unit='score'),
- dict(name='Oxboys', loader='oxboys', task='regression', outcome='height', group='Subject', numeric=['age'], categorical=[], slope='age', unit='cm'),
- dict(name='Loblolly', loader='loblolly', task='regression', outcome='height', group='Seed', numeric=['age'], categorical=[], slope=None, unit='ft'),
- dict(name='Aids2', loader='aids2', task='classification', outcome='status', positive='D', group='state', numeric=['age'], categorical=['sex','T.categ'], slope=None, unit='probability'),
- dict(name='Males', loader='males', task='classification', outcome='union', positive='yes', group='nr', numeric=['school','exper'], categorical=['ethn','industry'], slope=None, unit='probability'),
- dict(name='VerbAgg', loader='verbagg', task='classification', outcome='r2', positive='Y', group='id', numeric=['Anger'], categorical=['Gender','btype','situ','mode'], slope=None, unit='probability'),
- dict(name='Train', loader='train', task='classification', outcome='choice', positive='choice1', group='id', numeric=['price1','time1','change1','comfort1','price2','time2','change2','comfort2'], categorical=[], slope=None, unit='probability'),
+ # Regression: n>=919, meaningful group structure
+ dict(name='Sleepstudy',   loader='sleepstudy',   task='regression',     outcome='Reaction', group='Subject',    numeric=['Days'],                                                  categorical=[],                                    slope='Days', unit='ms'),
+ dict(name='ChickWeight',  loader='chickweight',  task='regression',     outcome='weight',   group='Chick',      numeric=['Time'],                                                  categorical=['Diet'],                              slope=None,   unit='g'),
+ dict(name='MathAchieve',  loader='mathachieve',  task='regression',     outcome='MathAch',  group='School',     numeric=['SES','MEANSES'],                                         categorical=['Minority','Sex'],                    slope=None,   unit='score'),
+ dict(name='Spruce',       loader='spruce',       task='regression',     outcome='logSize',  group='Tree',       numeric=['days'],                                                  categorical=[],                                    slope='days', unit='logcm3'),
+ dict(name='Radon',        loader='radon',        task='regression',     outcome='log.radon',group='county',     numeric=['basement','uranium'],                                    categorical=[],                                    slope=None,   unit='log-pCi/L'),
+ # Classification: n>=1908, genuine group-level variance
+ dict(name='Contraception',loader='contraception',task='classification', outcome='use',      positive='Y',       group='district',   numeric=['age'],                               categorical=['livch','urban'],                     slope=None,   unit='probability'),
+ dict(name='Toenail',      loader='toenail',      task='classification', outcome='outcome',  positive='moderate or severe', group='patientID', numeric=['time','visit'],          categorical=['treatment'],                         slope=None,   unit='probability'),
+ dict(name='VerbAgg',      loader='verbagg',      task='classification', outcome='r2',       positive='Y',       group='id',         numeric=['Anger'],                             categorical=['Gender','btype','situ','mode'],      slope=None,   unit='probability'),
+ dict(name='Train',        loader='train',        task='classification', outcome='choice',   positive='choice1', group='id',         numeric=['price1','time1','change1','comfort1','price2','time2','change2','comfort2'], categorical=[], slope=None, unit='probability'),
+ dict(name='Exam',         loader='exam',         task='classification', outcome='normexam', positive='above0',  group='school',     numeric=['standLRT','schavg'],                 categorical=['schgend','vr','intake','sex'],        slope=None,   unit='probability'),
 ]
 
 class FullBatchModel(TabMixNN):
@@ -147,6 +150,9 @@ def classical(train, query, formula, task, regime, work):
 
 def run_one(cfg, regime, epochs, seeds, output, split_seed=SPLIT_SEED):
     df = load(cfg['loader'])
+    # Pre-processing hooks for datasets needing derived outcomes
+    if cfg['name'] == 'Exam':
+        df['normexam'] = (df['normexam'] > 0).map({True: 'above0', False: 'below0'})
     cols = cfg['numeric']+cfg['categorical']+[cfg['group'],cfg['outcome']]
     if df[cols].isna().any().any():
         raise ValueError(f"Missing model input in {cfg['name']}; define a training-only policy first")

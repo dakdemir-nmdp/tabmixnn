@@ -10,15 +10,18 @@ DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 _URLS = {
-    "sleepstudy":  "https://vincentarelbundock.github.io/Rdatasets/csv/lme4/sleepstudy.csv",
-    "chickweight": "https://vincentarelbundock.github.io/Rdatasets/csv/datasets/ChickWeight.csv",
-    "machines":    "https://vincentarelbundock.github.io/Rdatasets/csv/nlme/Machines.csv",
-    "oxboys":      "https://vincentarelbundock.github.io/Rdatasets/csv/nlme/Oxboys.csv",
-    "loblolly":    "https://vincentarelbundock.github.io/Rdatasets/csv/datasets/Loblolly.csv",
-    "aids2":       "https://vincentarelbundock.github.io/Rdatasets/csv/MASS/Aids2.csv",
-    "males":       "https://vincentarelbundock.github.io/Rdatasets/csv/Ecdat/Males.csv",
-    "verbagg":     "https://vincentarelbundock.github.io/Rdatasets/csv/lme4/VerbAgg.csv",
-    "train":       "https://vincentarelbundock.github.io/Rdatasets/csv/Ecdat/Train.csv",
+    # Regression
+    "sleepstudy":   "https://vincentarelbundock.github.io/Rdatasets/csv/lme4/sleepstudy.csv",
+    "chickweight":  "https://vincentarelbundock.github.io/Rdatasets/csv/datasets/ChickWeight.csv",
+    "mathachieve":  "https://vincentarelbundock.github.io/Rdatasets/csv/nlme/MathAchieve.csv",
+    "spruce":       "https://vincentarelbundock.github.io/Rdatasets/csv/nlme/Spruce.csv",
+    "radon":        "https://vincentarelbundock.github.io/Rdatasets/csv/HLMdiag/radon.csv",
+    # Classification
+    "contraception":"https://vincentarelbundock.github.io/Rdatasets/csv/mlmRev/Contraception.csv",
+    "toenail":      "https://vincentarelbundock.github.io/Rdatasets/csv/lme4/toenail.csv",
+    "verbagg":      "https://vincentarelbundock.github.io/Rdatasets/csv/lme4/VerbAgg.csv",
+    "train":        "https://vincentarelbundock.github.io/Rdatasets/csv/Ecdat/Train.csv",
+    "exam":         "https://vincentarelbundock.github.io/Rdatasets/csv/mlmRev/Exam.csv",
 }
 
 
