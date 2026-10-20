@@ -2,6 +2,8 @@
 import numpy as np
 import pandas as pd
 import torch
+import pytest
+from copy import deepcopy
 from experiments.run_manuscript_benchmarks import (
     within_group_holdout, prepare, metrics, make_model, DATASETS, FullBatchModel,
 )
@@ -63,8 +65,10 @@ def test_metric_units_and_probability_scores():
 
 
 def test_matched_predictors_and_fixed_only_neural_control():
-    ox=next(d for d in DATASETS if d['name']=='Oxboys')
-    assert ox['numeric']==['age'] and ox['categorical']==[]
+    # Spruce's occasion index must not become an extra predictor for any method.
+    spruce=next(d for d in DATASETS if d['name']=='Spruce')
+    assert spruce['numeric']==['days'] and spruce['categorical']==[]
+    assert spruce['slope']=='days'
     df=pd.DataFrame({'y':[0.,1.,2.,3.], 'x0':[-1.,0.,1.,2.], 'g':['a','a','b','b']})
     model=make_model('y ~ x0','regression',42,1,len(df)).fit(df)
     assert len(model.encoder.config)==0
@@ -79,3 +83,22 @@ def test_calibration_identity_and_signed_probability_bias():
     assert result['converged'] and abs(result['intercept'])<1e-6
     assert abs(result['slope']-1)<1e-6 and result['mean_probability_error']==0
     assert sum(b['n'] for b in result['bins'])==len(y)
+
+
+def test_split_validation_rejects_duplicate_pairs_and_changed_execution_code():
+    from experiments.summarize_split_sensitivity import validate_payloads
+    datasets=[dict(name='toy')]
+    first=dict(protocol=dict(split_seed=11,epochs=2000,seeds=[42,123,456]),
+               results=[dict(dataset='toy',regime='A'),dict(dataset='toy',regime='B')],
+               code_hashes={'experiments/mixed_reference.R':'same'})
+    second=deepcopy(first)
+    second['protocol']['split_seed']=12
+    validate_payloads([first,second],[11,12],datasets)
+    bad=deepcopy(second)
+    bad['results'][1]['regime']='A'
+    with pytest.raises(ValueError,match='duplicate'):
+        validate_payloads([first,bad],[11,12],datasets)
+    bad=deepcopy(second)
+    bad['code_hashes']['experiments/mixed_reference.R']='changed'
+    with pytest.raises(ValueError,match='code hash mismatch'):
+        validate_payloads([first,bad],[11,12],datasets)

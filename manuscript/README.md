@@ -27,4 +27,13 @@ The downloaded arXiv archive and unused legacy `summary_table.tex`,
 `regression_table.tex`, and `classification_table.tex` may remain locally.
 They are not inputs to this revision and are not part of its versioned sources.
 The current manuscript excludes performance claims unsupported by the new
-nine-dataset evaluation. It is a draft for author review, not a submission.
+ten-dataset evaluation (five regression and five classification tasks, five
+splits in each of two prediction regimes). It is a draft for author review,
+not a submission.
+
+The October 20 reconciliation is documented in
+`../docs/manuscript-reconciliation-2026-10-20.md`. It supersedes the older
+nine-dataset counts and results in the dated audit reports. Use this branch's
+canonical benchmark artifacts, not the different CV results on
+`review/2026-10-14`. The branch comparison and integration disposition are in
+`../docs/branch-review-2026-10-20.md`.

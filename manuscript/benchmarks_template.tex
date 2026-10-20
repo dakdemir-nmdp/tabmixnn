@@ -2,7 +2,7 @@
 % experiments/summarize_split_sensitivity.py.
 \subsection{Benchmark Datasets}
 
-Ten public datasets were evaluated: five regression and five binary classification tasks (Table~\ref{tab:datasets}). All datasets have $n \geq 919$ and genuine group-level variance. Small datasets previously used in this evaluation (Machines $n=54$, Oxboys $n=234$, Loblolly $n=84$) and datasets with near-random baselines (Aids2 AUC$\approx$0.525, Males individual-level RE) were replaced. The dataset inventory and all reported tables refer to the same experiments.
+Ten public datasets were evaluated: five regression and five binary classification tasks (Table~\ref{tab:datasets}), with 180 to 7,584 observations and 18 to 316 groups. Sleepstudy and ChickWeight retain smaller samples of 180 and 578 observations, respectively; the other eight datasets have at least 919 observations. The dataset set was revised after examining an earlier evaluation: Machines, Oxboys, Loblolly, Aids2 and Males were replaced by MathAchieve, Spruce, Radon, Contraception and Exam. This selection was exploratory, partly informed by earlier sample-size and performance limitations, rather than a prespecified representative sample of prediction tasks. All reported tables use the revised dataset set.
 
 \input{datasets_table.tex}
 \FloatBarrier
@@ -11,7 +11,7 @@ Ten public datasets were evaluated: five regression and five binary classificati
 Sleepstudy predicts reaction time in milliseconds from Days, with subject-specific intercepts and slopes. ChickWeight predicts weight in grams from Time and categorical Diet, with chick intercepts. MathAchieve predicts mathematics achievement score from SES, MEANSES, Minority and Sex, with school-level random intercepts; this is a classic hierarchical linear model benchmark with 160 schools. Spruce predicts log stem volume from days of growth, with tree-specific intercepts and slopes; Occasion is not supplied to any method. Radon predicts log indoor radon concentration from basement indicator and county-level uranium, with county random intercepts; this is a canonical multilevel benchmark with 85 counties.
 
 \paragraph{Classification}
-Contraception predicts contraceptive use from age, number of living children and urban indicator, grouped by district (60 districts). Toenail predicts severe toenail infection from treatment, time and visit number, grouped by patient (294 patients, repeated measures). VerbAgg predicts the dichotomized response from Anger, Gender, behavior type, situation and mode, grouped by respondent. Train predicts choice1 from the two alternatives' price, time, changes and comfort, grouped by respondent; the choice identifier is excluded. Exam predicts above-median exam score (normexam $> 0$) from prior attainment, school gender composition, verbal reasoning band, intake band and sex, grouped by school (65 schools). These outcomes and model predictors have no missing values in the downloaded versions.
+Contraception predicts contraceptive use from age, number of living children and urban indicator, grouped by district (60 districts). Toenail predicts the recorded ``moderate or severe'' outcome from treatment, time and visit number, grouped by patient (294 patients, repeated measures). VerbAgg predicts the dichotomized response from Anger, Gender, behavior type, situation and mode, grouped by respondent. Train predicts choice1 from the two alternatives' price, time, changes and comfort, grouped by respondent; the choice identifier is excluded. Exam predicts whether the normalized exam score exceeds zero (normexam $> 0$) from individual and school-average prior attainment, school gender composition, verbal reasoning band, intake band and sex, grouped by school (65 schools). This fixed threshold is not a sample-median split. These outcomes and model predictors have no missing values in the downloaded versions.
 
 \subsection{Experimental Setup}
 
@@ -21,13 +21,13 @@ Contraception predicts contraceptive use from age, number of living children and
 
 \textbf{Regime B: out-of-group holdout.} A random 25\% of complete groups, rounded down with a minimum of one, is held out. No labeled support from these groups is available. TabMixNN uses zero random effects, and the classical mixed model uses its fixed part. For nonlinear models these are plug-in predictions at zero latent effects, not marginal integration over new-group variation. Kinship/GP extrapolation is not evaluated in this suite.
 
-The primary tables use split seed 20261015, shared by all methods. A fixed sensitivity extension repeats both regimes with split seeds 20261016, 20261017, 20261018 and 20261019, keeping the model configurations and all three neural initialization seeds unchanged. These additional splits were specified after inspecting the primary analysis and are reported as an exploratory robustness analysis, not independent confirmatory validation. Test outcomes are used only for final evaluation. All categorical coding and numeric/target standardization are fitted on the training partition. Unseen categorical levels receive the training reference coding. The recorded split manifests permit exact reconstruction.
+The primary tables use split seed 20261015, shared by all methods. A fixed sensitivity extension repeats both regimes with split seeds 20261016, 20261017, 20261018 and 20261019, keeping the model configurations and all three neural initialization seeds unchanged. These additional splits were specified after inspecting the primary analysis and are reported as an exploratory robustness analysis, not independent confirmatory validation. Within each reported split, test outcomes do not enter model fitting, adaptation or preprocessing. All categorical coding and numeric/target standardization are fitted on the training partition. Unseen categorical levels receive the training reference coding. The recorded split manifests permit exact reconstruction.
 
 \subsubsection{Models and Training Budgets}
 
 TabMixNN uses one hidden layer of width 32, embedding dimension 8, UN covariance and a Gaussian or binomial head. Each fit uses 2,000 full-batch Adam updates with learning rate 0.01, KL multiplier one, zero weight decay, no dropout, no centering and no extra structural penalties. Full batches retain source row order. The structural backbone options are disabled in the main comparison. Three initialization seeds (42, 123 and 456) are evaluated, without selecting the best seed. There is no test-driven hyperparameter search or early stopping.
 
-The \textbf{fixed neural control} uses the same hidden architecture and budget with random terms removed. The \textbf{classical mixed baseline} uses the same fixed and random designs: Gaussian LMMs are fitted by ML using \texttt{lme4::lmer}; binomial GLMMs use \texttt{glmer} with the Laplace approximation \citep{bates2014fitting}. Known-group predictions include conditional fitted effects, whereas Regime B uses zero effects. Final optimizer convergence checks passed. On the primary split, the Aids2 and Train random-intercept fits were singular in both regimes. These boundary estimates are retained and reported; a fitted group-variance parameter need not be nonzero merely because a mixed model was specified.
+The \textbf{fixed neural control} uses the same hidden architecture and budget with random terms removed. The \textbf{classical mixed baseline} uses the same fixed and random designs: Gaussian LMMs are fitted by ML using \texttt{lme4::lmer}; binomial GLMMs use \texttt{glmer} with the Laplace approximation \citep{bates2014fitting}. The binomial fitting routine tries \texttt{bobyqa}, then \texttt{nloptwrap} and \texttt{nlminbwrap} if an optimizer raises an error, retaining the first successful fit; test performance is not used to choose the optimizer. Known-group predictions include conditional fitted effects, whereas Regime B uses zero effects. Final optimizer convergence checks passed. On the primary split, only the Train random-intercept fits were singular, in both regimes. These boundary estimates are retained and reported; a fitted group-variance parameter need not be nonzero merely because a mixed model was specified.
 
 \textbf{XGBoost} uses 200 trees, maximum depth 6 and learning rate 0.05 \citep{chen2016xgboost}. \textbf{Random Forest} uses 200 trees and minimum leaf size two. Both use seed 42. All methods receive the same substantive predictors; in Regime A, trees additionally receive training-fitted one-hot group indicators to make known-group information available. Trees receive no group indicators in Regime B. These are fixed comparator configurations, not exhaustively tuned methods.
 
@@ -42,25 +42,25 @@ The executed environment used PyTorch 2.5.1, scikit-learn 1.9.1, XGBoost 3.2.0, 
 \subsection{Results}
 
 \subsubsection{Within-Group Regression}
-TabMixNN has lower RMSE than the fixed neural control on all five known-group regression tasks. The comparison with other methods is task-dependent. On MathAchieve (score: $6.13$ vs XGBoost $6.12$) and Radon (log-pCi/L: $0.771$ vs XGBoost $0.777$), TabMixNN is competitive with or better than XGBoost, consistent with the benefit of modeling school- and county-level random effects. On Spruce, TabMixNN ($0.148$) substantially outperforms the fixed neural control ($0.658$) and the classical mixed model ($0.326$), reflecting the benefit of tree-specific intercept and slope random effects for growth-curve prediction. ChickWeight shows the largest absolute gap over the fixed neural control ($5.58$ vs $40.28$), consistent with the benefit of chick-specific random intercepts on a nonlinear growth trajectory.
+TabMixNN has lower RMSE than the fixed neural control on all five known-group regression tasks, although the difference on Radon is small ($0.771$ vs $0.772$). The comparison with other methods is task-dependent. On MathAchieve, RMSE is $6.132$ for TabMixNN, $6.123$ for XGBoost and $6.059$ for the classical mixed model. On Spruce, TabMixNN ($0.148$) has lower RMSE than the fixed neural control ($0.658$) and the classical mixed model ($0.326$). ChickWeight also shows a large within-dataset difference from the fixed neural control ($5.580$ vs $40.278$ g). These comparisons support the use of fitted group information for these tasks, but do not isolate the contribution of each random-effect component.
 
 \input{regression_A_table.tex}
 \FloatBarrier
 
 \subsubsection{Out-of-Group Regression}
-Without observed outcomes from the test groups, the advantage is smaller and more variable. Radon shows the clearest benefit: TabMixNN ($0.735$) outperforms XGBoost ($0.862$) and RF ($0.814$), consistent with the county-level uranium fixed covariate being available for unseen counties. MathAchieve also shows TabMixNN ($6.235$) competitive with XGBoost ($6.407$) and RF ($6.750$), while the classical mixed model ($6.107$) is lowest. On Spruce, all methods converge to similar RMSE ($\approx 0.61$) since tree-specific growth trajectories cannot be recovered without labeled support. The contrast between Tables~\ref{tab:regression_A} and~\ref{tab:regression_B} shows why the two prediction settings must be reported separately.
+Without observed outcomes from the test groups, the advantage is smaller and more variable. On Radon, TabMixNN RMSE ($0.735$) is below XGBoost ($0.862$) and RF ($0.814$), while the classical mixed model is lower still ($0.711$). MathAchieve also shows TabMixNN ($6.235$) below XGBoost ($6.407$) and RF ($6.750$), with the classical mixed model lowest ($6.107$). On Spruce, neural and tree methods have RMSE near $0.61$, compared with $0.660$ for the classical mixed model; the known-group advantage of TabMixNN is absent. The contrast between Tables~\ref{tab:regression_A} and~\ref{tab:regression_B} shows why the two prediction settings must be reported separately.
 
 \input{regression_B_table.tex}
 \FloatBarrier
 
 \subsubsection{Within-Group Classification}
-Known-group classification shows heterogeneous results. Toenail shows the largest benefit: TabMixNN AUC $0.942 \pm 0.006$ vs fixed neural control $0.687 \pm 0.010$, reflecting strong patient-level random effects in repeated-measures infection data. VerbAgg and Train also show clear improvements over the fixed neural control. Contraception and Exam show smaller differences; the classical mixed model is competitive or best on these datasets, suggesting that the linear random-intercept structure is sufficient for district- and school-level clustering.
+Known-group classification shows heterogeneous results. Toenail has the largest AUROC difference from the fixed neural control: $0.942 \pm 0.006$ vs $0.687 \pm 0.010$. VerbAgg and Train also show higher AUROC than the fixed neural control. Contraception and Exam show smaller differences, and the classical mixed model has higher AUROC than TabMixNN on both tasks. The ranking by AUROC need not match the ranking by Brier score, as illustrated by Contraception.
 
 \input{classification_A_table.tex}
 \FloatBarrier
 
 \subsubsection{Out-of-Group Classification}
-For entirely unseen groups, Toenail shows a striking reversal: TabMixNN AUC drops to $0.542 \pm 0.042$ (near chance), while the fixed neural control ($0.670$) and classical mixed model ($0.681$) retain useful discrimination. This confirms that Toenail's strong known-group performance is driven by patient-specific fitted effects that cannot generalize to new patients. VerbAgg and Train retain TabMixNN advantages in regime B ($0.697$ and $0.737$ respectively), consistent with fixed-effect predictors (anger scores, price/time attributes) that generalize across groups. Exam shows the classical mixed model ($0.815$) outperforming all neural methods in regime B, suggesting that the linear school-level structure captures the out-of-group signal more efficiently than the variational approximation.
+For entirely unseen groups, Toenail shows a reversal: TabMixNN AUROC is $0.542 \pm 0.042$, while the fixed neural control and classical mixed model have AUROC $0.670$ and $0.681$, respectively. The known-group gain therefore does not carry over to this prediction setting. VerbAgg and Train retain higher TabMixNN AUROC than the fixed neural control ($0.697$ vs $0.679$ and $0.737$ vs $0.683$), although the classical mixed model has lower Brier scores on both tasks. On Exam, the classical mixed model has AUROC $0.815$, compared with $0.762$ for TabMixNN. These results do not identify which architectural or optimization difference explains the rankings.
 
 \input{classification_B_table.tex}
 \FloatBarrier
@@ -78,35 +78,38 @@ Table~\ref{tab:ablation_comprehensive} compares seven configurations on the same
 \FloatBarrier
 
 \subsubsection{Sensitivity to the Data Split}
+The five split values are an exploratory robustness check with the same fixed
+training budget. They are neither five independent studies nor a substitute
+for external validation. All twenty dataset/regime combinations have five
+distinct test partitions. No favorable
+split or initialization is selected for reporting.
+
 \input{split_regression_table.tex}
 \FloatBarrier
 \input{split_classification_table.tex}
 \FloatBarrier
 
-The five split values are an exploratory robustness check with the same fixed
-training budget. They are neither five independent studies nor a substitute
-for external validation. The five seeds produce only two distinct held-out
-group partitions for Machines and three for Aids2 in regime B; the other
-dataset/regime combinations have five distinct test partitions. No favorable
-split or initialization is selected for reporting.
-
 Across splits, TabMixNN retains lower mean RMSE than the fixed neural control
-on all five known-group regression tasks. Spruce shows the most consistent
-benefit ($0.146 \pm 0.008$ vs fixed NN $0.649 \pm 0.008$), confirming that
-tree-specific random slopes are the dominant signal. MathAchieve and Radon
-show TabMixNN competitive with or better than XGBoost across splits; the
-classical mixed model is lowest on MathAchieve ($6.050 \pm 0.075$). For
-unseen groups, Radon shows the most consistent TabMixNN advantage
-($0.751 \pm 0.050$ vs XGBoost $0.890 \pm 0.068$), while Spruce converges
-to similar RMSE across all methods ($\approx 0.62$).
+on all five known-group regression tasks. The Spruce difference remains large
+($0.146 \pm 0.008$ vs fixed NN $0.649 \pm 0.008$), whereas the Radon
+difference is smaller than the displayed three-decimal precision.
+TabMixNN has lower five-split mean RMSE than XGBoost on four of five
+known-group tasks and three of five unseen-group tasks. The classical mixed
+model has lower mean RMSE than TabMixNN on three of five tasks in each regime.
+On unseen-group Radon, for example, RMSE is $0.751 \pm 0.050$ for
+TabMixNN, $0.890 \pm 0.068$ for XGBoost and $0.734 \pm 0.051$ for the
+classical mixed model. These counts describe numerical rankings under the
+fixed protocol; they do not establish statistically significant differences.
 
 For classification, Toenail shows the largest and most consistent known-group
 benefit ($0.951 \pm 0.014$ vs fixed NN $0.670 \pm 0.020$), but the
 out-of-group reversal is also consistent ($0.591 \pm 0.068$ vs fixed NN
-$0.682 \pm 0.024$), confirming that patient-level effects do not generalize.
-VerbAgg and Train retain TabMixNN advantages across splits in both regimes.
-Exam shows the classical mixed model competitive or best in both regimes
-($0.811 \pm 0.006$ in A, $0.797 \pm 0.013$ in B). These comparisons
+$0.682 \pm 0.024$). VerbAgg and Train retain higher TabMixNN mean AUROC
+than the fixed neural control in both regimes.
+TabMixNN has higher mean AUROC than XGBoost on three of five known-group
+tasks and two of five unseen-group tasks. The classical mixed model has
+higher mean AUROC than TabMixNN on all five unseen-group tasks, including
+Exam ($0.797 \pm 0.013$ vs $0.749 \pm 0.013$). These comparisons
 support task-specific predictive benefits, not a uniform advantage for unseen
 groups.
 
@@ -125,13 +128,13 @@ establish transportable calibration.
 \input{calibration_table.tex}
 \FloatBarrier
 
-All eight TabMixNN calibration slopes in Table~\ref{tab:calibration} are below
-one, ranging from 0.132 to 0.731, indicating that the fitted log-odds are too
+All ten TabMixNN calibration slopes in Table~\ref{tab:calibration} are below
+one, ranging from 0.082 to 0.731, indicating that the fitted log-odds are too
 extreme under this diagnostic on the primary split. A mean probability close
-to the observed event fraction does not resolve this problem: Aids2 in regime
-A has a mean error of only $-0.002$ but a slope of 0.228. On Males in regime
-B, the observed event fraction is 0.280 and the mean predicted probability
-is 0.128, an underprediction of 15.2 percentage points. These results limit
+to the observed event fraction does not resolve this problem: Exam in regime
+A has a mean error of only $0.002$ but a slope of 0.684. On Toenail in regime
+B, the observed event fraction is 0.202 and the mean predicted probability
+is 0.045, an underprediction of 15.7 percentage points. These results limit
 the use of the fitted probabilities as absolute risks, even where
 discrimination is useful. They do not assess posterior predictive coverage.
 
@@ -146,4 +149,4 @@ The fitted lines in Figure~\ref{fig:ablation_days_effects} summarize the plotted
 
 \subsection{Scope of the Empirical Evidence}
 
-These experiments evaluate Gaussian regression, binomial classification and one component comparison on ten datasets with $n \geq 919$ and genuine group-level variance. They do not evaluate survival prediction, multitask benefit, genomic prediction or the spatial manifold backbone. The repeated splits probe sensitivity to the held-out rows or groups, but limited model configurations leave tuning sensitivity unresolved. Specialized mixed-effects machine-learning baselines such as LMMNN and GPBoost are not evaluated. The package supports these additional interfaces, but no performance claim for them follows from the present results.
+These experiments evaluate Gaussian regression, binomial classification and one component comparison on ten grouped datasets. They do not evaluate survival prediction, multitask benefit, genomic prediction or the spatial manifold backbone. The repeated splits probe sensitivity to the held-out rows or groups, but the exploratory dataset selection and limited model configurations leave selection and tuning sensitivity unresolved. Specialized mixed-effects machine-learning baselines such as LMMNN and GPBoost are not evaluated. The package supports additional interfaces, but no performance claim for them follows from the present results.

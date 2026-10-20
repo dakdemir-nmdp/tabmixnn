@@ -1,7 +1,7 @@
 # Reproducible manuscript experiments
 
 The canonical manuscript suite is `run_manuscript_benchmarks.py`. It evaluates
-all nine datasets supported by `data_utils.py` in two prediction settings:
+all ten datasets supported by `data_utils.py` in two prediction settings:
 
 - **A: known groups.** Hold out 25% (rounded down, minimum one) of observations
   separately within every group having at least two observations. At least one
@@ -30,7 +30,7 @@ uv pip install --python .venv/bin/python statsmodels scipy xgboost matplotlib
 `--resume` skips completed dataset/regime pairs only after exact protocol and
 benchmark-source-hash checks. `--datasets Sleepstudy --epochs 5 --seeds 42
 --output experiments/data/smoke.json` is a smoke run, not a manuscript run.
-Primary tables require all 18 dataset/regime pairs and the separate ablations.
+Primary tables require all 20 dataset/regime pairs and the separate ablations.
 
 ## Protocol
 
@@ -46,6 +46,8 @@ budget. Sleepstudy additionally has a scalar linear VI control. lme4 uses
 ML for LMMs and Laplace approximate ML (`nAGQ=1`) for binomial GLMMs; known
 groups use conditional fitted effects, new groups use zero effects. The latter
 is a plug-in prediction, not integration over the random-effect distribution.
+The binomial routine tries bobyqa, then nloptwrap and nlminbwrap after errors;
+it retains the first successful fit without reference to test performance.
 Convergence messages and singular fits are retained in the aggregate output.
 
 XGBoost uses 200 trees, depth 6, learning rate .05. Random Forest uses 200 trees
@@ -62,9 +64,12 @@ metrics by mean and sample SD across seeds on the **same split**. This SD
 measures initialization variability, not sampling uncertainty or a confidence
 interval. No cross-dataset average of raw RMSE is meaningful.
 
-Aids2 predicts recorded final vital status, not fixed-horizon survival risk.
-Its varying observation times limit interpretation. Males predicts union
-membership; VerbAgg predicts a dichotomized response; Train predicts choice1.
+Classification outcomes are contraceptive use (Contraception), the recorded
+"moderate or severe" outcome (Toenail), a dichotomized response (VerbAgg),
+choice1 (Train), and normalized exam score greater than zero (Exam).
+The Exam threshold is fixed, not the sample median. The dataset set was
+revised after an earlier evaluation and is exploratory. Sleepstudy and
+ChickWeight have 180 and 578 rows; the other eight datasets have at least 919.
 No clinical use or external validation is claimed.
 
 ## Artifacts and historical scripts
@@ -89,7 +94,7 @@ are described as implemented capabilities, not empirically validated here.
 The primary analysis retains split seed 20261015. An exploratory extension,
 specified after the primary analysis, fixes four additional seeds before
 executing their fits. All five splits use the same three neural seeds, training
-budget and comparator settings. No result is selected by performance.
+budget and comparator settings. No split or neural initialization is selected by performance.
 
 ```sh
 for split_seed in 20261016 20261017 20261018 20261019; do
@@ -101,7 +106,9 @@ done
 .venv/bin/python experiments/verify_variational_identities.py
 ```
 
-The summary script independently reconstructs every metric from the ignored
+The summary script requires the exact dataset/regime inventory, matching
+execution code hashes (including the R reference), a common training protocol,
+and matching current source/data hashes. It independently reconstructs every metric from the ignored
 local prediction files, then generates two split-sensitivity tables and one
 calibration table. Neural metrics are averaged over initializations within
 split before summarizing over splits. Overlapping holdouts and repeated small-
@@ -109,11 +116,22 @@ group partitions prevent interpreting split SDs as independent standard errors.
 Calibration intercept/slope and bin summaries use held-out predictions only
 for evaluation, not for recalibration or model selection. The symbolic script
 requires SymPy; its output is an explicit finite-dimensional algebra check,
-not a formal proof of all model properties.
+not a formal proof of all model properties. Counts are computed during
+validation: the current five-split suite contains 100 dataset/regime/split
+pairs, 930 model records and 3,240 metric checks. The primary split contains
+186 model records. Seven primary tables and three sensitivity/calibration
+tables are generated from these results and the separate ablation artifact.
 
-Every benchmark file now records hashes of the model source modules as well
-as experiment scripts. The primary 168 model records were rerun after the
-API repairs; no metric changed by more than 1e-7 from session 89.
+Every benchmark file records hashes of the model source modules as well
+as experiment scripts. The current ten-dataset payloads match the delivered
+execution source. The following notes describe the earlier nine-dataset
+October 16–17 runs; they do not describe an exception needed to verify the
+current payloads.
+
+### Historical nine-dataset execution notes
+
+The earlier primary 168 model records were rerun after the API repairs;
+no metric changed by more than 1e-7 from session 89.
 
 One VerbAgg-A reference fit for split 20261018 encountered lme4's
 `Downdated VtV is not positive definite` error inside the combined runner.

@@ -54,17 +54,37 @@ def table(name,caption,label,columns,rows):
     (ROOT/'manuscript'/name).write_text(tex)
 
 
+def validate_payloads(payloads, splits, datasets):
+    """Require complete, unique pairs and a common execution protocol."""
+    expected={(cfg['name'], regime) for cfg in datasets for regime in ('A','B')}
+    if len(payloads) != len(splits) or not payloads:
+        raise ValueError('One benchmark payload is required per split')
+    reference=payloads[0]
+    for seed,payload in zip(splits,payloads):
+        pairs=[(r['dataset'],r['regime']) for r in payload['results']]
+        if len(pairs) != len(expected) or set(pairs) != expected:
+            raise ValueError(f'Missing, duplicate or unexpected dataset/regime pairs for split {seed}')
+        protocol=payload['protocol']
+        if protocol['split_seed'] != seed:
+            raise ValueError(f'Incorrect split seed: expected {seed}')
+        if protocol['epochs'] != 2000 or protocol['seeds'] != [42,123,456]:
+            raise ValueError(f'Incorrect training budget for split {seed}')
+        if {k:v for k,v in protocol.items() if k != 'split_seed'} != {
+                k:v for k,v in reference['protocol'].items() if k != 'split_seed'}:
+            raise ValueError(f'Protocol mismatch for split {seed}')
+        if payload['code_hashes'] != reference['code_hashes']:
+            raise ValueError(f'Execution code hash mismatch for split {seed}')
+
+
 def main():
     paths=[ROOT/'experiments/results'/('manuscript_benchmarks.json' if s==SPLITS[0]
              else f'manuscript_split_{s}.json') for s in SPLITS]
     payloads=[json.loads(p.read_text()) for p in paths]
-    for seed,payload in zip(SPLITS,payloads):
-        assert payload['protocol']['split_seed']==seed and len(payload['results'])==20
-        assert payload['protocol']['epochs']==2000 and payload['protocol']['seeds']==[42,123,456]
-        # Allow mixed_reference.R hash to differ across splits (optimizer fallback added mid-run)
-        hashes_excl_r = {k:v for k,v in payload['code_hashes'].items() if k != 'experiments/mixed_reference.R'}
-        ref_excl_r = {k:v for k,v in payloads[0]['code_hashes'].items() if k != 'experiments/mixed_reference.R'}
-        assert hashes_excl_r == ref_excl_r, f'Code hash mismatch (non-R files) for split {seed}'
+    validate_payloads(payloads,SPLITS,DATASETS)
+    for name,digest in payloads[0]['code_hashes'].items():
+        if hashlib.sha256((ROOT/name).read_bytes()).hexdigest() != digest:
+            raise ValueError(f'Current source differs from executed source: {name}')
+    validated_pairs=validated_records=validated_metrics=0
     summary=[]; cal=[]; tables={'regression':[],'classification':[]}
     for cfg in DATASETS:
         for regime in ['A','B']:
@@ -81,6 +101,9 @@ def main():
             tables[cfg['task']].append(row)
             # Reconcile every saved metric with local source/predictions, all splits.
             df=load(cfg['loader'])
+            source_digest=hashlib.sha256((DATA_DIR/f"{cfg['loader']}.csv").read_bytes()).hexdigest()
+            if any(r['source_sha256'] != source_digest for r in records):
+                raise ValueError(f"Source-data hash mismatch: {cfg['name']}")
             # Apply dataset-specific pre-processing hooks (must match run_manuscript_benchmarks.py)
             if cfg['name'] == 'Exam':
                 df['normexam'] = (df['normexam'] > 0).map({True: 'above0', False: 'below0'})
@@ -98,9 +121,12 @@ def main():
                         a,d = actual_metrics[key], val
                         if np.isnan(a) and np.isnan(d): continue
                         np.testing.assert_allclose(a,d,rtol=1e-10,atol=1e-10)
+                        validated_metrics+=1
+                    validated_records+=1
                     if seed==SPLITS[0] and cfg['task']=='classification':
                         cal.append(dict(dataset=cfg['name'],regime=regime,model=rec['model'],seed=rec['seed'],
                                         **calibration(y,pred['prediction'])))
+                validated_pairs+=1
     for task,rows in tables.items():
         metric='Raw-unit RMSE' if task=='regression' else 'AUROC'
         table(f'split_{task}_table.tex',metric+' over five fixed repeated holdouts. Each neural split value is the mean metric across three initialization seeds. Entries are mean $\\pm$ sample SD across split values. Reused observations and repeated group partitions make these descriptive SDs, not standard errors or confidence intervals.',
@@ -118,8 +144,12 @@ def main():
           'tab:calibration',['Dataset','Regime','Observed','Predicted','Difference','$a$','$b$'],rows)
     output=dict(split_seeds=SPLITS,source_hashes={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in paths},
         code_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        sensitivity=summary,primary_calibration=cal,metric_reconstruction='passed for every model record in all 90 dataset/regime/split pairs')
+        sensitivity=summary,primary_calibration=cal,
+        validation_counts=dict(dataset_regime_split_pairs=validated_pairs,
+                               model_records=validated_records,metrics=validated_metrics),
+        metric_reconstruction=f'passed for every model record in all {validated_pairs} dataset/regime/split pairs')
     (ROOT/'experiments/results/manuscript_sensitivity.json').write_text(json.dumps(output,indent=2,allow_nan=False)+'\n')
-    print('Validated 90 pairs; wrote split sensitivity and calibration tables.')
+    print(f'Validated {validated_pairs} pairs, {validated_records} model records and '
+          f'{validated_metrics} metrics; wrote split sensitivity and calibration tables.')
 
 if __name__=='__main__': main()
