@@ -28,7 +28,7 @@ class MixedEffectsRepresentation(nn.Module):
         - Test data with new groups receive index 0
         - Behavior controlled by `unknown_strategy` parameter:
             * "learned": Uses a learned embedding for unseen groups (self.unknown_params)
-            * "zero": Uses mean of training group embeddings
+            * "zero": Uses the zero prior mean for unrelated unseen groups
         - This affects ALL random effect terms and is applied during forward()
     """
     def __init__(
@@ -37,11 +37,11 @@ class MixedEffectsRepresentation(nn.Module):
         embedding_dim,
         random_terms_config,
         cov_struct_map=None,
-        kl_normalize=True,
+        kl_normalize=False,
         scale_random_by_terms=False,
-        unknown_strategy="learned",
+        unknown_strategy="zero",
         use_fixed_bias=True,
-        enforce_centering=True,
+        enforce_centering=False,
     ):
         """
         Args:
@@ -49,7 +49,10 @@ class MixedEffectsRepresentation(nn.Module):
             embedding_dim: Dimension of embedding space
             random_terms_config: List of random effect term configurations
             cov_struct_map: Dict mapping term_id to covariance structure
-            kl_normalize: Normalize KL divergence by number of elements
+            kl_normalize: Normalize KL by parameter count (default False). Setting
+                True divides the KL sum by the total number of variational parameters,
+                which destroys the ELBO's probabilistic interpretation and makes
+                kl_auto_scale meaningless. Use False; a mean per-row NLL requires KL / N in training.
             scale_random_by_terms: Scale random effects by number of terms
             unknown_strategy: Strategy for unseen groups - "learned" or "zero"
             enforce_centering: If True, enforce zero-mean constraint on random effects (orthogonal to intercept)
@@ -59,6 +62,8 @@ class MixedEffectsRepresentation(nn.Module):
         self.fixed_linear = nn.Linear(fixed_input_dim, embedding_dim, bias=use_fixed_bias)
         self.kl_normalize = kl_normalize
         self.scale_random_by_terms = scale_random_by_terms
+        if unknown_strategy not in ("zero", "learned"):
+            raise ValueError("unknown_strategy must be 'zero' or 'learned'")
         self.unknown_strategy = unknown_strategy
         self.enforce_centering = enforce_centering
         
@@ -105,8 +110,8 @@ class MixedEffectsRepresentation(nn.Module):
                 self.cov_modules[tid] = AR1Covariance(n_levels, n_slopes)
 
             elif ctype in ["AR", "ARMA"]:
-                p = int(cargs.get("p", 1))
-                q = int(cargs.get("q", 0))
+                p = cargs.get("p", 1)
+                q = cargs.get("q", 0)
                 self.variational_params[tid] = nn.ParameterList([
                     nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
                     nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
@@ -128,7 +133,7 @@ class MixedEffectsRepresentation(nn.Module):
                 self.cov_modules[tid] = UnstructuredSlopeCovariance(n_levels, n_slopes)
 
             elif ctype == "KRON":
-                train_levels = cargs.get("train_levels", train_levels)
+                train_levels = list(train_levels)
                 n_train_levels = len(train_levels) if train_levels else n_levels
                 
                 self.variational_params[tid] = nn.ParameterList([
@@ -155,13 +160,13 @@ class MixedEffectsRepresentation(nn.Module):
 
             elif ctype == "K":
                 # For K, we maintain variational params only for training levels; unseen levels are predicted via Henderson BLUP.
-                train_levels = cargs.get("train_levels", train_levels)
+                train_levels = list(train_levels)
                 n_train_levels = len(train_levels)
                 self.variational_params[tid] = nn.ParameterList([
                     nn.Parameter(torch.zeros(n_train_levels, n_slopes, embedding_dim)), # mu for train
                     nn.Parameter(torch.ones(n_train_levels, n_slopes, embedding_dim) * -2.0) # log_s for train
                 ])
-                matrix_tensor = cargs.get("matrix_tensor", None)
+                matrix_tensor = cargs.get("matrix_tensor", cargs.get("K_group"))
                 all_levels = cargs.get("levels", train_levels)
                 lambda_k = cargs.get("lambda_k", 1e-4)
                 self.cov_modules[tid] = KCovariance(
@@ -174,7 +179,7 @@ class MixedEffectsRepresentation(nn.Module):
                 )
 
             elif ctype == "GP":
-                train_levels = cargs.get("train_levels", train_levels)
+                train_levels = list(train_levels)
                 all_levels = cargs.get("levels", train_levels)
                 coords = cargs.get("coords", None)
                 if coords is None:
@@ -194,13 +199,16 @@ class MixedEffectsRepresentation(nn.Module):
                     lambda_k=lambda_k
                 )
 
-            else:
-                # Default: IID covariance
+            elif ctype == "IID":
+                # Independent prior in noncentered coordinates
                 self.variational_params[tid] = nn.ParameterList([
                     nn.Parameter(torch.zeros(n_levels, n_slopes, embedding_dim)), # mu
                     nn.Parameter(torch.ones(n_levels, n_slopes, embedding_dim) * -2.0) # log_s
                 ])
                 self.cov_modules[tid] = IIDCovariance(n_levels, n_slopes)
+
+            else:
+                raise ValueError(f"Unknown covariance type: {ctype}")
 
             if self.unknown_strategy == "learned":
                 self.unknown_params[tid] = nn.Parameter(torch.zeros(1, n_slopes, embedding_dim))
@@ -221,156 +229,111 @@ class MixedEffectsRepresentation(nn.Module):
         wrapper = SimpleNamespace(weight=mu_param)
         setattr(self, f"random_intercept_embeddings_{group_name}", wrapper)
 
-    def forward(self, X, Z_indices, Z_slopes, use_random_effects: bool = True):
-        # X: [batch, fixed_dim]
-        # Z_indices: list of [batch] indices
-        # Z_slopes: list of [batch, n_slopes]
-        
-        # Fixed part
+    def random_effects_values(self, term_id, latent):
+        """Transform noncentered latent values; optionally project training effects.
+
+        Centering defines a different, projected prior. KL remains in the
+        unprojected latent coordinates, so training and evaluation use one model.
+        Related unseen levels use conditional means, without conditional noise.
+        """
+        cov = self.cov_modules[term_id]
+        values = cov(latent)
+        if self.enforce_centering:
+            if hasattr(cov, "train_idx"):
+                reference = values.index_select(0, cov.train_idx)
+            else:
+                reference = values
+            values = values - reference.mean(dim=0, keepdim=True)
+        return values
+
+    def forward(self, X, Z_indices, Z_slopes, use_random_effects: bool = True,
+                _transductive_override: Optional[Dict[str, torch.Tensor]] = None):
         fixed_out = self.fixed_linear(X)
-        
-        # Random parts
         random_out = torch.zeros_like(fixed_out)
-        kl_sum = 0.0
+        kl_sum = fixed_out.new_zeros(())
         kl_elems = 0
-        n_terms = max(len(self.config), 1)
-        
         if use_random_effects:
             for i, term in enumerate(self.config):
                 tid = term['term_id']
-                indices = Z_indices[i] # [batch]
-                slopes_val = Z_slopes[i] # [batch, n_slopes]
-                
+                indices, slopes = Z_indices[i], Z_slopes[i]
                 mu, log_s = self.variational_params[tid]
-                
-                # KL divergence: q(v) vs prior
-                cov_module = self.cov_modules[tid]
-                
-                # Enforce centering (orthogonality to intercept)
-                if self.enforce_centering and isinstance(cov_module, (IIDCovariance, UnstructuredSlopeCovariance)):
-                     # mu: [n_levels, n_slopes, emb]
-                     mu_mean = mu.mean(dim=0, keepdim=True)
-                     mu = mu - mu_mean
-                
-                if isinstance(cov_module, KCovariance):
-                    # KL between q = N(mu, diag(s^2)) and p = N(0, sigma^2 * K)
-                    n_train = mu.shape[0]
-                    s = torch.exp(log_s)  # [n_train, n_slopes, emb]
-                    k_inv = cov_module.K_inv
-                    diag_k_inv = cov_module.K_inv_diag
-                    logdet_p_base = cov_module.K_logdet
-                    
-                    # Get learned sigma from covariance module
-                    # sigma is [n_slopes, 1] usually
-                    if hasattr(cov_module, 'log_sigma'):
-                        sigma_sq = torch.exp(cov_module.log_sigma * 2.0).view(1, -1, 1) # [1, n_slopes, 1]
-                        log_sigma_sq = cov_module.log_sigma * 2.0 # [n_slopes, 1]
-                    else:
-                        sigma_sq = torch.ones(1, n_slopes, 1, device=mu.device)
-                        log_sigma_sq = torch.zeros(n_slopes, 1, device=mu.device)
-
-                    # Ensure cache on the correct device (in case model was moved)
-                    if k_inv.device != mu.device:
-                        k_inv = k_inv.to(mu.device)
-                        diag_k_inv = diag_k_inv.to(mu.device)
-                        logdet_p_base = logdet_p_base.to(mu.device)
-
-                    kl_term = 0.0
-                    # Iterate slopes and embeddings
-                    for sl in range(mu.shape[1]):
-                        sig2 = sigma_sq[0, sl, 0]
-                        nb_log_sig2 = n_train * log_sigma_sq[sl, 0]
-                        # logdet_p = logdet(sig2 * K) = N * log(sig2) + logdet(K)
-                        logdet_p = logdet_p_base + nb_log_sig2
-                        
-                        for e in range(mu.shape[2]):
-                            mu_vec = mu[:, sl, e]  # [n_train]
-                            s_vec = s[:, sl, e]    # stds
-                            logdet_q = 2.0 * torch.log(torch.clamp(s_vec, min=1e-8)).sum()
-                            
-                            # trace(Sigma_p^{-1} Sigma_q) -> trace(K^{-1}/sig2 * s^2)
-                            trace_term = (diag_k_inv * (s_vec ** 2)).sum() / sig2
-                            
-                            # mu^T Sigma_p^{-1} mu -> mu^T K^{-1} mu / sig2
-                            quad_term = (mu_vec @ (k_inv @ mu_vec)) / sig2
-                            
-                            kl_term = kl_term + 0.5 * (trace_term + quad_term - n_train + logdet_p - logdet_q)
-                    kl_sum = kl_sum + kl_term
-                    kl_elems += (mu.numel() + log_s.numel())
-
-                else:
-                    # IID/other priors: q(v) vs N(0, I)
-                    s = torch.exp(log_s)
-                    var = s**2
-                    kl = 0.5 * (var + mu**2 - 1 - 2*log_s).sum()
-                    kl_sum = kl_sum + kl
-                    kl_elems += (mu.numel() + log_s.numel())
-                
-                if self.training:
-                    noise = torch.randn_like(mu)
-                    v_input = mu + noise * torch.exp(log_s)
-                else:
-                    # Use mean at evaluation time for deterministic predictions
-                    v_input = mu
-                
-                # Apply Covariance Structure L
-                if isinstance(cov_module, (KCovariance, KroneckerCovariance, GPCovariance)):
-                    u_expected = cov_module(v_input, indices)  # already [batch, slopes, emb]
-                    if self.unknown_strategy == "learned":
-                        unknown_row = self.unknown_params[tid]
-                    else:
-                        unknown_row = u_expected.mean(dim=0, keepdim=True)
-                    if (indices == 0).any():
-                        u_expected = u_expected.clone()
-                        u_expected[indices == 0] = unknown_row
-                    gathered_u = u_expected
-                else:
-                    u_expected = cov_module(v_input) # [levels, slopes, emb]
-                    # Reserve index 0 for unseen groups -> configurable strategy
-                    if self.unknown_strategy == "learned":
-                        unknown_row = self.unknown_params[tid]
-                    else:
-                        unknown_row = u_expected.mean(dim=0, keepdim=True)
-                    u_padded = torch.cat([unknown_row, u_expected], dim=0)
-                    gathered_u = u_padded.index_select(0, indices.clamp(min=0))
-                
-                # Weighted sum
-                term_contrib = (gathered_u * slopes_val.unsqueeze(-1)).sum(dim=1)
-                random_out += term_contrib
-            
+                # All covariance modules use p(v)=N(0,I), u=L(theta)v.
+                kl_sum = kl_sum + 0.5 * (log_s.mul(2).exp() + mu.square() - 1 - 2*log_s).sum()
+                kl_elems += mu.numel() + log_s.numel()
+                latent = mu + torch.randn_like(mu) * log_s.exp() if self.training else mu
+                values = self.random_effects_values(tid, latent)
+                unknown = (self.unknown_params[tid] if self.unknown_strategy == "learned"
+                           else values.new_zeros(1, *values.shape[1:]))
+                gathered = torch.cat([unknown, values], dim=0).index_select(0, indices)
+                if _transductive_override is not None and tid in _transductive_override:
+                    gathered = torch.where((indices == 0)[:, None, None],
+                                           _transductive_override[tid], gathered)
+                random_out = random_out + (gathered * slopes.unsqueeze(-1)).sum(dim=1)
         kl_out = kl_sum / max(kl_elems, 1) if self.kl_normalize else kl_sum
-        random_out_scaled = random_out / n_terms if self.scale_random_by_terms else random_out
-        return fixed_out + random_out_scaled, kl_out
+        if self.scale_random_by_terms:
+            random_out = random_out / max(len(self.config), 1)
+        return fixed_out + random_out, kl_out
 
     def get_variance_summary(self):
         """
-        Returns a dict of term_id -> {slope_idx: sigma_value, type: cov_type}
+        Returns a dict of term_id -> {sigmas, rho (if AR1), type}.
+
+        Scales are in embedding space. For finite-start ARMA, sigmas is the
+        innovation scale (marked by scale_kind), not a marginal scale:
+          - IID/K/GP: sigma (already marginal)
+          - AR1: sigma / sqrt(1 - rho^2) (stationary marginal std)
+          - ARMA: innovation sigma; marginal scales vary with level
+          - Kronecker: sqrt(diag(L_slope @ L_slope.T))
         """
         summary = {}
         for term_id, mod in self.cov_modules.items():
-            # Assume mod has log_sigma or similar
-            # IID and AR1 have log_sigma
-            # K has log_sigma
-            
-            # Access params directly? Or rely on convention.
             vals = {}
-            if hasattr(mod, 'log_sigma'):
+
+            if isinstance(mod, AR1Covariance):
+                sigma = torch.exp(mod.log_sigma).detach().cpu()
+                rho = torch.tanh(mod.raw_rho).detach().cpu()
+                # Marginal std of stationary AR1: sigma / sqrt(1 - rho^2)
+                marginal = (sigma / torch.sqrt(1.0 - rho ** 2 + 1e-8)).numpy().flatten()
+                vals['sigmas'] = marginal
+                vals['rho'] = rho.numpy().flatten()
+                vals['innovation_sigma'] = sigma.numpy().flatten()
+
+            elif isinstance(mod, ARMACovariance):
+                # Finite-start ARMA has level-dependent marginal variances.
+                sigma = torch.exp(mod.log_sigma).detach().cpu().numpy().flatten()
+                vals['sigmas'] = sigma
+                vals['innovation_sigma'] = sigma
+                vals['scale_kind'] = 'innovation'
+                vals['initialization'] = 'zero_presample'
+                if mod.phi_raw is not None:
+                    phi = mod.ar_coefficients.detach().cpu().numpy()
+                    vals['phi'] = phi
+
+            elif isinstance(mod, UnstructuredSlopeCovariance):
+                import torch.nn.functional as F
+                L = torch.tril(mod.raw_lower, -1) + torch.diag(F.softplus(mod.raw_lower.diag()) + 1e-3)
+                vals['sigmas'] = (L.square().sum(dim=1).sqrt()).detach().cpu().numpy()
+                vals['covariance'] = (L @ L.T).detach().cpu().numpy()
+
+            elif hasattr(mod, 'log_sigma'):
                 sigmas = torch.exp(mod.log_sigma).detach().cpu().numpy().flatten()
                 vals['sigmas'] = sigmas
+                if hasattr(mod, 'raw_rho'):
+                    rho = (mod.correlation if isinstance(mod, CompoundSymmetryCovariance) else torch.tanh(mod.raw_rho)).detach().cpu().numpy().flatten()
+                    vals['rho'] = rho
+
             elif hasattr(mod, 'raw_lower_slope'):
-                # KroneckerCovariance
+                # KroneckerCovariance: marginal std from slope Cholesky
+                import torch.nn.functional as F
                 tril = torch.tril(mod.raw_lower_slope)
                 jitter = getattr(mod, 'jitter', 1e-4)
-                diag = torch.diag(torch.nn.functional.softplus(torch.diag(mod.raw_lower_slope)) + jitter)
-                L = tril - torch.diag(torch.diag(tril)) + diag
+                diag_vals = F.softplus(torch.diag(mod.raw_lower_slope)) + jitter
+                diag_mat = torch.diag(diag_vals)
+                L = tril - torch.diag(torch.diag(tril)) + diag_mat
                 Sigma = L @ L.t()
                 sigmas = torch.sqrt(torch.diag(Sigma)).detach().cpu().numpy()
                 vals['sigmas'] = sigmas
-            
-            if hasattr(mod, 'raw_rho'): # AR1
-                rho = torch.tanh(mod.raw_rho).detach().cpu().numpy().flatten()
-                vals['rho'] = rho
-                
+
             vals['type'] = mod.__class__.__name__
             summary[term_id] = vals
         return summary
@@ -393,7 +356,7 @@ def _build_random_config(design: CompiledDesign) -> List[Dict[str, Any]]:
         cfg.append(
             {
                 "term_id": term.term_id,
-                "n_levels": max(term.level_map.values()) + 1 if term.level_map else 1,
+                "n_levels": len(term.level_map),
                 "n_slopes": len(term.slope_cols),
                 "group": term.group_col,
                 "train_levels": getattr(term, "train_levels", []),
@@ -404,7 +367,7 @@ def _build_random_config(design: CompiledDesign) -> List[Dict[str, Any]]:
 
 def _infer_fixed_input_dim(design: CompiledDesign) -> int:
     if getattr(design, "design_info", None) is not None:
-        return design.design_info.matrix_shape[1]
+        return len(design.design_info.column_names)
 
     dim = 1 if design.intercept_included else 0
     for spec in design.fixed_cols:
@@ -439,7 +402,7 @@ class MixedEffectsEncoder(nn.Module):
         cov_struct_map: Optional[Dict[str, Any]] = None,
         add_sam: bool = False,
         fixed_input_dim: Optional[int] = None,
-        kl_normalize: bool = True,
+        kl_normalize: bool = False,
     ):
         super().__init__()
         self.design = compiled_design
@@ -454,7 +417,7 @@ class MixedEffectsEncoder(nn.Module):
             cov_struct_map=cov_struct_map,
             kl_normalize=kl_normalize,
             scale_random_by_terms=False,  # Hardcoded optimal default
-            use_fixed_bias=not compiled_design.intercept_included,
+            use_fixed_bias=False,
         )
 
         self.mixed_activation = None  # Hardcoded: no activation after mixed block

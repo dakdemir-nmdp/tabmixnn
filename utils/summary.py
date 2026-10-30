@@ -15,15 +15,7 @@ def _design_feature_names(design) -> List[str]:
     names: List[str] = []
     if design is None:
         return names
-    for spec in getattr(design, "fixed_cols", []):
-        if spec.get("type") == "numeric":
-            names.append(spec["name"])
-        elif spec.get("type") == "categorical":
-            levels = design.categorical_dummy_levels.get(
-                spec["name"], design.categorical_levels.get(spec["name"], [])
-            )
-            for lvl in levels:
-                names.append(f"{spec['name']}[{lvl}]")
+    names = list(getattr(design, "fixed_feature_names", []))
     return names
 
 
@@ -56,10 +48,15 @@ def _closed_form_fixed_effects(model, feature_names: List[str]) -> Optional[pd.D
         eff_w = head_w @ enc_w  # [out_dim, fixed_dim]
         eff_b = head_b + head_w @ enc_b  # [out_dim]
 
-        slopes = eff_w[0]
-        intercept = eff_b[0]
-        names = ["(Intercept)"] + (feature_names or [f"x{i}" for i in range(len(slopes))])
-        coefficients = np.concatenate([[intercept], slopes])
+        coefficients = eff_w[0].copy()
+        names = list(feature_names or [f"x{i}" for i in range(len(coefficients))])
+        if "Intercept" in names:
+            idx = names.index("Intercept")
+            coefficients[idx] += eff_b[0]
+            names[idx] = "(Intercept)"
+        elif enc.bias is not None or (not model.use_identity_head and getattr(head, "bias", None) is not None):
+            names = ["(Intercept)"] + names
+            coefficients = np.concatenate([[eff_b[0]], coefficients])
         return pd.DataFrame({"Estimate": coefficients, "Method": "closed_form"}, index=names)
     except Exception:
         return None
@@ -116,146 +113,70 @@ def _linearized_fixed_effects(model, df, feature_names: List[str], sample_size: 
             z = torch.zeros((len(idx), slopes.shape[1]), dtype=torch.float32, device=device)
             Z_slopes_zero.append(z)
 
-        backups = _zero_random_effects(model)
+        modes = [(module, module.training) for module in model.modules()]
         try:
             model.eval()
-            model.zero_grad(set_to_none=True)
-            outputs = model.forward(Xt, Z_ind_zero, Z_slopes_zero)
+            outputs = model.forward(Xt, Z_ind_zero, Z_slopes_zero, use_random_effects=False)
             logits = outputs[list(outputs.keys())[0]] if isinstance(outputs, dict) else outputs
             if logits.ndim > 1:
                 logits = logits[:, 0]
             mean_pred = logits.mean()
-            mean_pred.backward()
-            grads = Xt.grad.detach().cpu().mean(dim=0).numpy()
+            gradients = torch.autograd.grad(logits.sum(), Xt)[0]
+            grads = gradients.detach().cpu().mean(dim=0).numpy()
             x_mean = Xt.detach().cpu().mean(dim=0).numpy()
             intercept = float(mean_pred.detach().cpu().item() - np.dot(grads, x_mean))
-            names = ["(Intercept)"] + (feature_names or [f"x{i}" for i in range(len(grads))])
-            coefficients = np.concatenate([[intercept], grads])
+            names = list(feature_names or [f"x{i}" for i in range(len(grads))])
+            coefficients = grads.copy()
+            if "Intercept" in names:
+                j = names.index("Intercept")
+                names[j] = "(Intercept)"
+                coefficients[j] += intercept
+            else:
+                names = ["(Intercept)"] + names
+                coefficients = np.concatenate([[intercept], coefficients])
             return pd.DataFrame({"Estimate": coefficients, "Method": "linearized"}, index=names)
         finally:
-            _restore_random_effects(model, backups)
+            for module, mode in modes:
+                module.training = mode
     except Exception:
         return None
 
 
-def _collect_random_effects(model) -> pd.DataFrame:
-    """Return BLUP-style random effect estimates as a DataFrame."""
-    enc = getattr(model, "encoder", None)
-    design = getattr(model, "design", None)
-    if enc is None or not hasattr(enc, "variational_params"):
+def _collect_random_effects(model, df=None) -> pd.DataFrame:
+    """Linear coefficients or explicitly labeled nonlinear term ablations."""
+    enc, design = getattr(model, "encoder", None), getattr(model, "design", None)
+    if enc is None or design is None:
         return pd.DataFrame()
-
-    from tabmixnn.covariance.structures import KCovariance, KroneckerCovariance, GPCovariance
-
-    records: List[Dict[str, Any]] = []
-    for term_cfg in getattr(enc, "config", []):
-        tid = term_cfg.get("term_id")
-        if tid not in enc.variational_params:
-            continue
-        mu_param, log_s_param = enc.variational_params[tid]
-        
-        cov = enc.cov_modules[tid] if tid in enc.cov_modules else None
-        
-        # Calculate expected Random Effects u = E[u|v]
-        # For structured covariances (GBLUP), this performs extrapolation to all levels
-        with torch.no_grad():
-            if isinstance(cov, (KCovariance, KroneckerCovariance, GPCovariance)):
-                n_total = getattr(cov, "n_levels", mu_param.shape[0])
-                all_indices = torch.arange(n_total, device=mu_param.device)
-                u_full = cov(mu_param, all_indices) # [N_total, Slopes, Emb]
-            else:
-                # IID, AR1, etc - apply transformation L if needed (usually L*v)
-                # cov(v) returns u
-                u_full = cov(mu_param) if cov else mu_param # [N_train, Slopes, Emb]
-
-        u_np = u_full.detach().cpu().numpy()
-        sd_np = np.exp(log_s_param.detach().cpu().numpy())
-        
-        # Covariance scale (if applicable)
-        scale = None
-        if cov is not None and hasattr(cov, "log_sigma"):
-            scale = np.exp(cov.log_sigma.detach().cpu().numpy())
-
-        term_info = None
-        if design is not None:
-            term_info = next((t for t in design.random_terms if t.term_id == tid), None)
-        slope_names = term_info.slope_cols if term_info else [f"slope_{j}" for j in range(u_np.shape[1])]
-        
-        # Determine Level Labels
-        # Prioritize covariance module's full_levels (handled GBLUP/Extrapolation correctly)
-        cov_levels = getattr(cov, "full_levels", None)
-        if cov_levels is not None:
-            all_labels = cov_levels
-        elif term_info and term_info.level_map:
-            inv_map = {v: k for k, v in term_info.level_map.items()}
-            # Ensure we cover the full range of output
-            all_labels = [inv_map.get(i, f"level_{i}") for i in range(u_np.shape[0])]
-        else:
-            all_labels = [f"level_{i}" for i in range(u_np.shape[0])]
-            
-        group_name = term_info.group_col if term_info else term_cfg.get("group", tid)
-
-        # Iterate over all produced levels
-        for i, level_label in enumerate(all_labels):
-            if i >= u_np.shape[0]: 
-                break
-                
-            # Attempt to determine if observed or extrapolated
-            # This is heuristics; strict checking would require checking indices mapping
-            kind = "observed"
-            sd_val_vec = None
-            if i < sd_np.shape[0] and not isinstance(cov, (KCovariance, KroneckerCovariance, GPCovariance)):
-                 # IID/AR1 case: 1-to-1 mapping
-                 sd_val_vec = sd_np[i]
-            elif isinstance(cov, (KCovariance, KroneckerCovariance, GPCovariance)):
-                 # Check if this level index i was in training set?
-                 # cov.train_indices maps train_idx -> full_idx
-                 # But we don't have reverse map easily exposed publicly
-                 # For now, label 'estimated'
-                 kind = "estimated"
-                 # We don't have posterior SD for extrapolated levels readily computed here without heavy lifting
-                 # So we leave SD as NaN for extrapolated, or use training mean SD roughly
-                 sd_val_vec = np.zeros_like(u_np[i]) * np.nan
-            else:
-                 sd_val_vec = np.zeros_like(u_np[i]) * np.nan
-
-            for slope_idx, slope_name in enumerate(slope_names):
-                est = u_np[i, slope_idx].mean()
-                
-                # Apply scale if it wasn't integrated into 'cov()' call
-                # Most cov modules include sigma in forward? 
-                # KCovariance forward: Y = L_slope @ V_e @ L_group.t(). 
-                # It does NOT multiply by sigma usually, sigma is separate in KL?
-                # Check structures.py: Scale might be needed.
-                if scale is not None:
-                     sigma_slice = scale[slope_idx] if scale.ndim > 1 else scale
-                     # Check if cov forward already applied it?
-                     # IID forward: v * noise -> no. 
-                     # We are transforming MEAN parameter. 
-                     # u = mu. Scaling by sigma happens at "gather" time in Encoder?
-                     # In encoder.py: term_contrib = (gathered_u * slopes_val).
-                     # gathered_u IS the effect.
-                     # It comes from cov_module(v).
-                     # So if cov_module includes sigma, it's there. 
-                     # Most don't include scalar sigma in forward, they return standardized u?
-                     # No, encoder.py calculates KL with sigma.
-                     # But where is sigma applied to u?
-                     pass # Revisit coherence of sigma application
-                
-                # For now assume u_np is the effect on the linear predictor scale
-                
-                sd_val = float(sd_val_vec[slope_idx].mean()) if sd_val_vec is not None else np.nan
-                records.append(
-                    {
-                        "group": group_name,
-                        "level": str(level_label),
-                        "slope": slope_name,
-                        "estimate": float(est),
-                        "sd": float(sd_val),
-                        "kind": kind,
-                        "term_id": tid,
-                    }
-                )
+    records = []
+    linear = (_is_strictly_linear(model) and len(model.outcomes) == 1
+              and model.use_identity_head and model.output_sem is None)
+    model.eval()
+    if linear:
+        for term in design.random_terms:
+            with torch.no_grad():
+                effects = enc.random_effects_values(term.term_id, enc.variational_params[term.term_id][0])
+                if enc.scale_random_by_terms:
+                    effects = effects / len(design.random_terms)
+            for label, index in term.level_map.items():
+                for j, slope in enumerate(term.slope_cols):
+                    records.append(dict(group=term.group_col, level=str(label), slope=slope,
+                                        estimate=float(effects[index-1, j, 0]), sd=np.nan,
+                                        kind="linear_coefficient", term_id=term.term_id))
+        return pd.DataFrame(records)
+    if df is None:
+        return pd.DataFrame()
+    for outcome in model.outcomes:
+        mode = "proba" if outcome.family.__class__.__name__ == "Binomial" else "default"
+        full = model.predict(df, outcome=outcome.name, mode=mode)
+        if np.asarray(full).ndim != 1:
+            continue  # A scalar estimand must be specified for vector outcomes.
+        for term in design.random_terms:
+            ablated = model._predict_single_term_ablation(df, outcome.name, term.term_id, mode)
+            group_values = pd.Series(full - ablated, index=df.index).groupby(df[term.group_col]).mean()
+            for label, estimate in group_values.items():
+                records.append(dict(group=term.group_col, level=str(label), slope="combined contribution",
+                                    estimate=float(estimate), sd=np.nan, kind="term_ablation",
+                                    outcome=outcome.name, term_id=term.term_id))
     return pd.DataFrame(records)
 
 
@@ -348,7 +269,7 @@ def parameter_estimates(model, data=None, sample_size: int = 256, linearize: boo
     feature_names = _design_feature_names(getattr(model, "design", None))
 
     fixed_effects = None
-    notes: List[str] = []
+    notes: List[str] = ["Linear random-effect estimates are variational conditional coefficients; nonlinear term ablations are not BLUPs. Covariance scales are in encoder units."]
     if _is_strictly_linear(model):
         fixed_effects = _closed_form_fixed_effects(model, feature_names)
     elif linearize:
@@ -360,7 +281,7 @@ def parameter_estimates(model, data=None, sample_size: int = 256, linearize: boo
         if fixed_effects is not None and not _is_strictly_linear(model):
             notes.append("Model is non-linear; fixed effects are from the first linear layer.")
 
-    random_effects = _collect_random_effects(model)
+    random_effects = _collect_random_effects(model, df)
     variance_components = _collect_variance_components(model)
     B_matrix, structural_edges = _collect_structural_edges(model)
 
@@ -411,62 +332,12 @@ class TabMixNNSummary:
         n_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         self.fit_stats['n_parameters'] = n_params
         
-        # Calculate log-likelihood, AIC, BIC, R² if training data available
-        if hasattr(self.model, '_train_data') and self.model._train_data is not None:
-            try:
-                df = self.model._train_data
-                n = len(df)
-                
-                # Get predictions
-                with torch.no_grad():
-                    y_pred = self.model.predict(df)
-                    if isinstance(y_pred, torch.Tensor):
-                        y_pred = y_pred.cpu().numpy()
-                    y_pred = y_pred.flatten()
-                
-                # Get true values
-                if hasattr(self.model, 'design') and self.model.design:
-                    outcome_name = self.model.design.outcomes[0].name
-                    y_true = df[outcome_name].values
-                else:
-                    # Try to infer outcome from formula
-                    import re
-                    match = re.match(r'(\w+)\s*~', self.model.formula)
-                    if match:
-                        outcome_name = match.group(1)
-                        y_true = df[outcome_name].values
-                    else:
-                        y_true = None
-                
-                if y_true is not None:
-                    # R² (coefficient of determination)
-                    ss_res = np.sum((y_true - y_pred)**2)
-                    ss_tot = np.sum((y_true - y_true.mean())**2)
-                    r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
-                    self.fit_stats['R2'] = r2
-                    
-                    # RMSE
-                    rmse = np.sqrt(np.mean((y_true - y_pred)**2))
-                    self.fit_stats['RMSE'] = rmse
-                    
-                    # Log-likelihood (approximate for Gaussian)
-                    # LL = -n/2 * log(2π) - n/2 * log(σ²) - 1/(2σ²) * Σ(y - ŷ)²
-                    sigma2 = ss_res / n  # MLE estimate of variance
-                    if sigma2 > 0:
-                        log_lik = -0.5 * n * np.log(2 * np.pi) - 0.5 * n * np.log(sigma2) - 0.5 * ss_res / sigma2
-                        self.fit_stats['logLik'] = log_lik
-                        
-                        # AIC = -2*LL + 2*k
-                        aic = -2 * log_lik + 2 * n_params
-                        self.fit_stats['AIC'] = aic
-                        
-                        # BIC = -2*LL + k*log(n)
-                        bic = -2 * log_lik + n_params * np.log(n)
-                        self.fit_stats['BIC'] = bic
-            except Exception as e:
-                # If calculation fails, just skip these metrics
-                pass
-    
+        for key in ("R2", "conditional_logLik"):
+            value = getattr(self.model, key, None)
+            if value is not None:
+                self.fit_stats[key] = value
+        self.notes.append("Conditional plug-in likelihood is not marginal likelihood; AIC/BIC and inferential standard errors are not provided.")
+
     def __str__(self):
         """Print summary in lme4-style format."""
         lines = []
@@ -505,7 +376,7 @@ class TabMixNNSummary:
             summary_df = (
                 self.random_effects.groupby(["group", "slope"])["estimate"]
                 .agg(["mean", "std"])
-                .rename(columns={"mean": "BLUP mean", "std": "BLUP sd"})
+                .rename(columns={"mean": "estimate mean", "std": "estimate sd"})
             )
             lines.append(summary_df.to_string())
         else:

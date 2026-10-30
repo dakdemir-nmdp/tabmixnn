@@ -248,6 +248,14 @@ family = DiscreteTimeCompetingRisks(time_bins=time_bins, num_causes=2)
 ## Training
 Use the `fit` method to train the model.
 
+Each `fit()` starts afresh, rebuilding preprocessing, network parameters,
+optimizer, and training histories. `reuse_design=existing_design` explicitly
+reuses preprocessing only. It does not resume training. Gaussian learned
+output heads without output SEM initialize their bias from observed training
+targets; validation targets do not participate. See the
+[training and covariance repair notes](docs/package-improvements-2026-10-15.md)
+for behavior changes and checkpoint compatibility.
+
 ```python
 model.fit(
     df,                      # Training data (pandas DataFrame)
@@ -257,8 +265,7 @@ model.fit(
     patience=10,            # Early stopping patience
     batch_size=128,         # Batch size
     lr=0.001,              # Learning rate
-    epochs=100,            # Maximum epochs
-    verbose=True           # Print progress
+    epochs=100             # Maximum epochs (set verbose on the constructor)
 )
 ```
 

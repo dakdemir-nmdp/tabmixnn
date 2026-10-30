@@ -99,3 +99,6 @@ examples/test_examples.py
 *.bak
 *.swp
 *~.nib
+
+# Downloaded public benchmark data (never commit row records)
+experiments/data/

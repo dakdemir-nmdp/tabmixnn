@@ -12,6 +12,7 @@ def rbf_kernel(x1, x2, lengthscale, jitter=1e-6):
         x2: [M, D]
         lengthscale: scalar or [D]
     """
+    self_kernel = x1 is x2
     if x1.dim() == 1: x1 = x1.unsqueeze(1)
     if x2.dim() == 1: x2 = x2.unsqueeze(1)
     
@@ -27,8 +28,8 @@ def rbf_kernel(x1, x2, lengthscale, jitter=1e-6):
     
     K = torch.exp(-0.5 * dist_sq.clamp(min=0))
     
-    if x1 is x2:
-        K = K + jitter * torch.eye(x1.shape[0], device=K.device)
+    if self_kernel:
+        K = K + jitter * torch.eye(x1.shape[0], device=K.device, dtype=K.dtype)
         
     return K
 
@@ -39,6 +40,7 @@ def matern_kernel(x1, x2, lengthscale, nu=1.5, jitter=1e-6):
     nu=1.5: Once differentiable
     nu=2.5: Twice differentiable
     """
+    self_kernel = x1 is x2
     if x1.dim() == 1: x1 = x1.unsqueeze(1)
     if x2.dim() == 1: x2 = x2.unsqueeze(1)
     
@@ -62,7 +64,7 @@ def matern_kernel(x1, x2, lengthscale, nu=1.5, jitter=1e-6):
         # Fallback or general case (requires Bessel functions, hard in pure torch)
         K = torch.exp(-0.5 * dist_sq) # default to RBF
         
-    if x1 is x2:
-        K = K + jitter * torch.eye(x1.shape[0], device=K.device)
+    if self_kernel:
+        K = K + jitter * torch.eye(x1.shape[0], device=K.device, dtype=K.dtype)
         
     return K

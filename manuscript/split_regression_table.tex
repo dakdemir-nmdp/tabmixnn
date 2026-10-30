@@ -1,0 +1,22 @@
+\begin{table}[htbp]
+\centering\small
+\caption{Raw-unit RMSE over five fixed repeated holdouts. Each neural split value is the mean metric across three initialization seeds. Entries are mean $\pm$ sample SD across split values. Reused observations and repeated group partitions make these descriptive SDs, not standard errors or confidence intervals.}
+\label{tab:split_regression}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrr}
+\toprule
+Dataset & Regime & TabMixNN & Fixed NN & Mixed & XGBoost & RF \\
+\midrule
+Sleepstudy (ms) & A & $27.058 \pm 5.256$ & $47.695 \pm 3.950$ & $25.727 \pm 4.826$ & $26.666 \pm 3.003$ & $28.927 \pm 5.423$ \\
+Sleepstudy (ms) & B & $40.823 \pm 9.597$ & $39.711 \pm 10.872$ & $38.571 \pm 10.993$ & $39.643 \pm 11.018$ & $39.545 \pm 11.074$ \\
+ChickWeight (g) & A & $6.175 \pm 0.480$ & $36.383 \pm 3.018$ & $29.408 \pm 1.174$ & $16.237 \pm 0.622$ & $28.496 \pm 2.493$ \\
+ChickWeight (g) & B & $38.728 \pm 4.357$ & $38.915 \pm 5.008$ & $39.998 \pm 5.617$ & $38.952 \pm 4.941$ & $38.946 \pm 4.833$ \\
+MathAchieve (score) & A & $6.107 \pm 0.063$ & $6.221 \pm 0.070$ & $6.050 \pm 0.075$ & $6.123 \pm 0.070$ & $6.404 \pm 0.059$ \\
+MathAchieve (score) & B & $6.277 \pm 0.041$ & $6.289 \pm 0.084$ & $6.187 \pm 0.060$ & $6.474 \pm 0.049$ & $6.769 \pm 0.069$ \\
+Spruce (logcm3) & A & $0.146 \pm 0.008$ & $0.649 \pm 0.008$ & $0.326 \pm 0.014$ & $0.311 \pm 0.012$ & $0.455 \pm 0.010$ \\
+Spruce (logcm3) & B & $0.623 \pm 0.075$ & $0.617 \pm 0.078$ & $0.666 \pm 0.072$ & $0.618 \pm 0.077$ & $0.618 \pm 0.078$ \\
+Radon (log-pCi/L) & A & $0.792 \pm 0.040$ & $0.792 \pm 0.030$ & $0.770 \pm 0.031$ & $0.801 \pm 0.045$ & $0.810 \pm 0.035$ \\
+Radon (log-pCi/L) & B & $0.751 \pm 0.050$ & $0.776 \pm 0.050$ & $0.734 \pm 0.051$ & $0.890 \pm 0.068$ & $0.835 \pm 0.048$ \\
+\bottomrule
+\end{tabular}}
+\end{table}

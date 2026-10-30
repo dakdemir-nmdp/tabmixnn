@@ -1,0 +1,22 @@
+\begin{table}[htbp]
+\centering\small
+\caption{Primary-split TabMixNN probability diagnostics, averaged across three fitted seeds. The intercept and slope jointly fit $\operatorname{logit}P(Y=1)=a+b\operatorname{logit}(\widehat p)$ on held-out rows. Their ideal values are 0 and 1. They are descriptive estimates, without independent-row uncertainty assumptions; no test-set recalibration is applied.}
+\label{tab:calibration}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrr}
+\toprule
+Dataset & Regime & Observed & Predicted & Difference & $a$ & $b$ \\
+\midrule
+Contraception & A & 0.403 & 0.387 & -0.017 & -0.113 & 0.501 \\
+Contraception & B & 0.389 & 0.416 & 0.027 & -0.286 & 0.468 \\
+Toenail & A & 0.235 & 0.199 & -0.037 & 0.584 & 0.674 \\
+Toenail & B & 0.202 & 0.045 & -0.157 & -1.076 & 0.082 \\
+VerbAgg & A & 0.454 & 0.482 & 0.028 & -0.183 & 0.731 \\
+VerbAgg & B & 0.489 & 0.523 & 0.034 & -0.090 & 0.406 \\
+Train & A & 0.542 & 0.506 & -0.036 & 0.225 & 0.488 \\
+Train & B & 0.527 & 0.515 & -0.012 & 0.102 & 0.229 \\
+Exam & A & 0.518 & 0.520 & 0.002 & 0.005 & 0.684 \\
+Exam & B & 0.492 & 0.425 & -0.067 & 0.197 & 0.514 \\
+\bottomrule
+\end{tabular}}
+\end{table}

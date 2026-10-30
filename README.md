@@ -1,6 +1,6 @@
 # TabMixNN
 
-**TabMixNN** is a PyTorch-based deep learning library that combines the best of mixed effects models and neural networks for tabular data analysis.
+**TabMixNN** is a PyTorch-based deep learning library that combines variational mixed-effects encoding with neural networks for tabular data analysis.
 
 ## Features
 
@@ -18,6 +18,12 @@
 ```bash
 pip install torch  # Install PyTorch first
 pip install tabmixnn
+
+# For running examples (matplotlib, scipy, xgboost):
+pip install -e ".[examples]"
+
+# Optional: lifelines for survival analysis utilities
+pip install -e ".[lifelines]"
 ```
 
 Or install from source:
@@ -30,7 +36,7 @@ pip install -e .
 
 ## Quick Start
 
-### Basic Linear Mixed Model
+### Neural Mixed-Effects Regression
 
 ```python
 import numpy as np
@@ -93,15 +99,67 @@ model.fit(df)
 
 ## Available Families
 
-- `Gaussian()` - Continuous outcomes (linear regression)
+- `Gaussian()` - Continuous outcomes with a learned common residual scale
+- `Multinomial(n_classes=3)` - Integer-coded multiclass outcomes
 - `Binomial()` - Binary classification
 - `Poisson()` - Count data
 - `NegBinomial()` - Overdispersed count data
-- `MultivariateGaussian()` - Multiple continuous outcomes
-- `MultiLabelBinomial()` - Multi-label classification
-- `DiscreteTimeSurvival()` - Survival analysis (discrete time)
-- `DiscreteTimeCompetingRisks()` - Competing risks
+- `MultivariateGaussian(n_tasks=2)` - Multiple continuous outcomes
+- `MultiLabelBinomial(n_labels=2)` - Multi-label classification
+- `DiscreteTimeSurvival(time_bins=[1, 2, 3])` - Survival analysis (discrete time)
+- `DiscreteTimeCompetingRisks(time_bins=[1, 2, 3], num_causes=2)` - Competing risks
 - `ContinuousSurvival()` - Survival analysis (continuous time)
+
+## Target and prediction contracts
+
+Use `OutcomeSpec(..., y=['y1', 'y2'])` for a vector response. Its column count
+must match the family. NaN denotes missing outcomes; vector rows must be fully
+observed to contribute. Each modeled outcome needs observed training and
+validation targets. Count and class labels must be nonnegative integers;
+binary outcomes and event indicators must be 0 or 1. Class labels are encoded
+explicitly by the caller. Prediction ignores any target columns supplied.
+
+Discrete survival grids contain increasing right endpoints. Events use the
+containing interval; censoring uses only completed intervals. Follow-up beyond
+the grid is rejected. These semantics apply to competing risks as well.
+
+For a fitted `ContinuousSurvival` outcome:
+
+```python
+curves = model.predict(test_data, mode="survival", times=[0., 1., 2., 5.])
+medians = model.predict(test_data, mode="median")
+log_hazard_scores = model.predict(test_data)  # explicit default semantics
+```
+
+Discrete-time survival prediction defaults to survival curves; request
+`mode="hazard"` for interval hazards. Older behavior returned hazards when the
+model passed `mode="default"`. Refit discrete survival models trained with
+non-endpoint censoring under the earlier rounding convention.
+
+Curves are conditional predictions with shape `(n_rows, n_times)`. They are
+not prediction intervals. The baseline scale and a free score intercept are
+not separately identified without a reference constraint.
+
+`feature_ablation_values(query, background_df=train)` uses a separate reference
+frame, preserves NumPy RNG state and reports compiled-design feature names.
+Select `outcome=...` for multitask ablations. Vector outputs require an explicit
+scalar estimand and currently raise `NotImplementedError`, rather than summing
+probabilities or time curves into an arbitrary score. Group and random-slope
+inputs remain fixed during a fixed-design feature ablation.
+
+## Statistical scope
+
+`TabMixNN.lmm(...)` is a scalar linear variational special case; it is not REML.
+At fixed covariance, its optimal means satisfy the mixed-model normal equations.
+Mean-field covariance and jointly fitted variance parameters need not match
+exact Gaussian inference. In neural models, latent rescaling can change
+encoder covariance without changing predictions. Latent variance summaries and
+structural edges are therefore not identified response-scale or causal effects.
+
+The [manuscript](manuscript/tabmixnn_methods.pdf) and
+[deep revision audit](docs/deep-revision-2026-10-16.md) state tested contracts,
+empirical scope and unresolved limitations. See [experiments](experiments/README.md)
+for reproduction; outcome support alone is not empirical validation.
 
 ## Architecture Options
 
@@ -199,24 +257,7 @@ If you use TabMixNN in your research, please cite:
 
 ## License
 
-**Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)**
-
-Copyright (c) 2025 Deniz Akdemir
-
-This work is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License.
-
-**You are free to:**
-- Share and redistribute the material
-- Adapt, remix, and build upon the material
-
-**Under the following terms:**
-- **Attribution**: Give appropriate credit and indicate if changes were made
-- **NonCommercial**: You may NOT use the material for commercial purposes
-
-**Commercial use requires explicit written permission.** For commercial licensing inquiries, contact: dakdemir@nmdp.org
-
-See the [LICENSE](LICENSE) file for full details or visit:
-https://creativecommons.org/licenses/by-nc/4.0/
+MIT License — Copyright (c) 2025 Deniz Akdemir. See the [LICENSE](LICENSE) file for full details.
 
 ## Contributing
 

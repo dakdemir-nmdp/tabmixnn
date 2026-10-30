@@ -14,7 +14,7 @@ Example Usage:
 For more information, see: https://github.com/dakdemir-nmdp/tabmixnn
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 __author__ = "Deniz Akdemir"
 __email__ = "deniz.akdemir.work@gmail.com"
 
@@ -24,14 +24,14 @@ from .parsing.formula import OutcomeSpec
 from .core.families import (
     Gaussian, Binomial, Poisson, NegBinomial, 
     DiscreteTimeSurvival, DiscreteTimeCompetingRisks,
-    MultivariateGaussian, MultiLabelBinomial, ContinuousSurvival
+    MultivariateGaussian, MultiLabelBinomial, ContinuousSurvival, Multinomial
 )
 from .utils.logging_config import set_log_level, disable_logging, enable_logging
 from .utils.summary import summary, parameter_estimates
 
 # Add summary method to TabMixNN
 TabMixNN.summary = lambda self, **kwargs: summary(self, **kwargs)
-TabMixNN.extract_parameters = lambda self, **kwargs: parameter_estimates(self, **kwargs)
+TabMixNN.extract_parameters = lambda self, data=None, **kwargs: parameter_estimates(self, data=data, **kwargs)
 
 # Legacy aliases - Pointing to Unified
 GeneralizedTabMixNN = TabMixNN 
@@ -60,6 +60,7 @@ __all__ = [
     "MultivariateGaussian",
     "MultiLabelBinomial",
     "ContinuousSurvival",
+    "Multinomial",
     
     # Utilities
     "set_log_level",

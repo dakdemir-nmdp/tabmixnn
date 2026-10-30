@@ -1,0 +1,9 @@
+# Local LaTeX products and original downloaded archive.
+*.aux
+*.bbl
+*.blg
+*.out
+*.fls
+*.fdb_latexmk
+arxiv_source.tar.gz
+00README.json

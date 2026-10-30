@@ -105,8 +105,13 @@ class MeasurementModel(nn.Module):
 
 class StaticStructureModel(nn.Module):
     """
-    Static structural dependencies (classical SEM).
+    Static structural dependencies.
     Implements: B_s η where B_s is strictly lower-triangular.
+
+    The triangular mask enforces acyclicity unconditionally; no DAG penalty is
+    needed or meaningful. The sparsity penalty encourages sparse edge weights
+    but carries no causal interpretation: latent rotations and reparameterisations
+    prevent identification of structural edges as causal effects.
     """
 
     def __init__(
@@ -198,10 +203,11 @@ class StaticStructureModel(nn.Module):
                 )
     
     def dag_penalty(self):
-        B = self.B
-        M = torch.matrix_exp(B * B)
-        return torch.trace(M) - self.dim
-    
+        """Deprecated: always returns zero because B is strictly lower-triangular by
+        construction (tril_mask zeros the diagonal and upper triangle), making it a
+        DAG unconditionally. Use sparsity_penalty() to encourage sparse edge weights."""
+        return self.B.new_zeros(())
+
     def sparsity_penalty(self):
         return self.sparse_penalty_weight * torch.abs(self.B).sum()
     
@@ -403,6 +409,20 @@ class DynamicStructureModel(nn.Module):
                 eta = eta.unsqueeze(-1)
             return self._forward_feature_mixing(eta, return_weights)
 
+        # m4: warn when called with flat input and feature_mixing=False.
+        # With seq_len=1, self-attention is a trivial 1x1 matrix — no dynamic
+        # structure is learned. Set feature_mixing=True (the default in
+        # GSEMHiddenLayer) for meaningful attention over tabular features.
+        if eta.dim() == 2:
+            import warnings
+            warnings.warn(
+                "DynamicStructureModel received a flat [batch, dim] input with "
+                "feature_mixing=False. Self-attention with seq_len=1 is a no-op — "
+                "no dynamic structure will be learned. Pass feature_mixing=True to "
+                "treat the dim axis as the sequence (standard for tabular data).",
+                UserWarning,
+                stacklevel=2,
+            )
         return self._forward_impl(eta, return_weights)
 
     def _forward_feature_mixing(self, x, return_weights):
@@ -505,8 +525,13 @@ class DynamicStructureModel(nn.Module):
 
 class HybridStructuralModel(nn.Module):
     """
-    Combines static SEM structure with dynamic attention.
-    Implements: η = (I - B_s - B_d(η))^{-1} ξ
+    Combines static and dynamic structure via fixed-point iteration.
+    Attempts to solve: η = ξ + B_s η + B_d(η) η
+
+    Convergence requires spectral norm of (B_s + B_d) < 1, which is not
+    guaranteed. Use lambda_contraction > 0 to encourage contraction during
+    training. If the iteration does not converge within max_iter steps a
+    warning is logged; consider CompositeStructuralModel for stability.
     """
     
     def __init__(
@@ -517,6 +542,8 @@ class HybridStructuralModel(nn.Module):
         static_config: Dict = None,
         dynamic_config: Dict = None,
         interpolation_alpha: Optional[float] = None,
+        max_iter: int = 10,
+        tol: float = 1e-5,
     ):
         super().__init__()
         
@@ -534,9 +561,9 @@ class HybridStructuralModel(nn.Module):
         if use_dynamic:
             self.B_dynamic = DynamicStructureModel(dim, **dynamic_config)
             
-        self.max_iter = 10
-        self.tol = 1e-5
-        self._convergence_failures = 0  # Track convergence failures for diagnostics
+        self.max_iter = max_iter  # m1: configurable
+        self.tol = tol            # m1: configurable
+        self._convergence_failures = 0
 
     def forward(self, xi, return_attention=False):
         """
@@ -544,7 +571,9 @@ class HybridStructuralModel(nn.Module):
 
         CONVERGENCE GUARANTEE:
             For convergence, the spectral norm ||B_static + B_dynamic|| < 1 is required.
-            The contraction penalty encourages this during training, but does not enforce it.
+            The contraction penalty encourages this during training, but does not enforce it
+            (lambda_contraction defaults to 0.0 in TabMixNN — set it > 0 when using this
+            model to protect gradient flow through the structural solve).
             If convergence fails (max_iter reached), a warning is logged.
 
         Consider using CompositeStructuralModel for guaranteed stability without iteration.
@@ -650,13 +679,19 @@ class HybridStructuralModel(nn.Module):
 
 class CompositeStructuralModel(nn.Module):
     """
-    Robust structural model implementing the 'General Formulation' composition:
-    
-    1. Resolve Static Geometry: u = (I - B_s)^-1 xi
-    2. Dynamic Attention: a = Attn(u)
-    3. Fusion: h = G * u + (1-G) * a
-    
-    This avoids fixed-point instability and ensures clean identification.
+    Gated sequential structural model.
+
+    Forward pass (three sequential stages):
+        1. Static solve:     u = (I - B_s)^{-1} xi
+        2. Dynamic attention: a = Attn(u)
+        3. Gated fusion:     h = alpha * u + (1 - alpha) * a
+
+    This is a distinct architecture from a coupled fixed-point equation.
+    It is not one iteration of Eq.22 or any approximation to it.
+    Use HybridStructuralModel for the iterative fixed-point solver.
+    approximation_error measures the output difference from a converged
+    coupled reference and raises if that reference does not converge.
+    A small observed difference is not a global bound.
     """
     def __init__(
         self,
@@ -726,6 +761,38 @@ class CompositeStructuralModel(nn.Module):
             p['dag'] = self.B_static.dag_penalty()
             p['sparsity'] = self.B_static.sparsity_penalty()
         return p
+
+    def approximation_error(self, xi: torch.Tensor, hybrid_max_iter: int = 50) -> float:
+        """Relative output difference from a converged coupled reference.
+
+        The ratio is nonnegative and unbounded. Raises if the reference fails
+        its relative residual tolerance; this is a local diagnostic only.
+        """
+        if hybrid_max_iter < 1:
+            raise ValueError("hybrid_max_iter must be positive")
+        modes = [(module, module.training) for module in self.modules()]
+        self.eval()
+        try:
+            with torch.no_grad():
+                h_composite = self.forward(xi)
+                eta = xi.clone()
+                def update(value):
+                    term = torch.zeros_like(value)
+                    if self.use_static:
+                        term = term + self.B_static(value)
+                    if self.use_dynamic:
+                        term = term + self.B_dynamic(value, return_weights=True)[0]
+                    return xi + term
+                for _ in range(hybrid_max_iter):
+                    eta = update(eta)
+                    residual = torch.norm(update(eta) - eta)
+                    if torch.isfinite(residual) and residual <= 1e-6 * (torch.norm(eta) + 1e-8):
+                        rel = torch.norm(h_composite-eta, dim=-1) / (torch.norm(eta, dim=-1)+1e-8)
+                        return float(rel.mean())
+                raise RuntimeError("Coupled reference did not converge; approximation error is unavailable")
+        finally:
+            for module, mode in modes:
+                module.training = mode
 
 
 class RandomEffectsModule(nn.Module):

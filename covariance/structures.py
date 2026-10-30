@@ -5,6 +5,24 @@ from .kernels import rbf_kernel
 
 import torch.nn.functional as F
 
+def _covariance_matrix(value, size, name):
+    matrix = torch.as_tensor(value, dtype=torch.float32)
+    if matrix.shape != (size, size) or not torch.isfinite(matrix).all():
+        raise ValueError(f"{name} must be a finite {size} by {size} matrix")
+    if not torch.allclose(matrix, matrix.T, atol=1e-6):
+        raise ValueError(f"{name} must be symmetric")
+    if torch.linalg.eigvalsh(matrix).min() < -1e-5:
+        raise ValueError(f"{name} must be positive semidefinite")
+    return matrix
+
+
+def _gather_levels(values, indices):
+    if indices is None:
+        return values
+    padding = values.new_zeros(1, *values.shape[1:])
+    return torch.cat([padding, values], dim=0).index_select(0, indices)
+
+
 class CovarianceStructure(nn.Module):
     """
     Abstract base class for covariance structures L_t(theta).
@@ -45,11 +63,18 @@ class IIDCovariance(CovarianceStructure):
 
 class ARMACovariance(CovarianceStructure):
     """
-    ARMA(p, q) along the level dimension for each slope independently.
-    Supports p >= 0, q >= 0 (recommended small: p<=2, q<=2). If p=1,q=0 this reduces to AR(1).
+    Finite-start ARMA(p, q), independently for each slope.
+
+    AR coefficients are built from bounded partial autocorrelations, ensuring
+    a stable AR polynomial in exact arithmetic. Pre-sample states are zero:
+    this is NOT the stationary-initialized covariance of AR1Covariance.
+    MA coefficients are bounded directly; invertibility is not imposed.
     """
     def __init__(self, n_levels, n_slopes, p=1, q=0):
         super().__init__(n_levels, n_slopes)
+        if any(isinstance(order, bool) or not isinstance(order, (int, np.integer)) or order < 0
+               for order in (p, q)):
+            raise ValueError("ARMA orders p and q must be nonnegative integers")
         self.p = p
         self.q = q
         self.log_sigma = nn.Parameter(torch.zeros(n_slopes, 1))
@@ -62,10 +87,27 @@ class ARMACovariance(CovarianceStructure):
         else:
             self.register_parameter("theta_raw", None)
 
+    @staticmethod
+    def _ar_from_partial_correlations(raw):
+        """Levinson recursion with phi[k,j]=phi[k-1,j]-kappa[k]*phi[k-1,k-j]."""
+        partial = torch.tanh(raw).clamp(-1 + 1e-6, 1 - 1e-6)
+        coefficients = partial[:1]
+        for k in range(1, raw.shape[0]):
+            coefficients = torch.cat([
+                coefficients - partial[k:k+1] * coefficients.flip(0),
+                partial[k:k+1],
+            ], dim=0)
+        return coefficients
+
+    @property
+    def ar_coefficients(self):
+        return (self._ar_from_partial_correlations(self.phi_raw)
+                if self.phi_raw is not None else None)
+
     def forward(self, v):
         # v: [n_levels, n_slopes, emb]
         sigma = torch.exp(self.log_sigma).unsqueeze(0)  # [1, n_slopes, 1]
-        phi = torch.tanh(self.phi_raw) if self.phi_raw is not None else None
+        phi = self.ar_coefficients
         theta = torch.tanh(self.theta_raw) if self.theta_raw is not None else None
 
         # Initialize buffers for previous u and eps
@@ -106,15 +148,25 @@ class CompoundSymmetryCovariance(CovarianceStructure):
         self.log_sigma = nn.Parameter(torch.zeros(n_slopes, 1))
         self.raw_rho = nn.Parameter(torch.zeros(n_slopes, 1))
 
+    @property
+    def correlation(self):
+        if self.n_levels <= 1:
+            return self.raw_rho * 0
+        lower = -1.0 / (self.n_levels - 1)
+        # Shift makes raw_rho=0 correspond to rho=0.
+        shift = -np.log(self.n_levels - 1)
+        unit = torch.sigmoid(self.raw_rho + shift).clamp(1e-6, 1 - 1e-6)
+        return lower + (1 - lower) * unit
+
     def forward(self, v):
         # v: [levels, slopes, emb]
         sigma = torch.exp(self.log_sigma)  # [slopes, 1]
-        rho = torch.tanh(self.raw_rho).clamp(-0.99, 0.99)  # stability
+        rho = self.correlation
 
         levels = self.n_levels
         device = v.device
-        ones = torch.ones(levels, levels, device=device)
-        eye = torch.eye(levels, device=device)
+        ones = torch.ones(levels, levels, device=device, dtype=v.dtype)
+        eye = torch.eye(levels, device=device, dtype=v.dtype)
 
         out = []
         for s in range(self.n_slopes):
@@ -160,8 +212,7 @@ class KroneckerCovariance(CovarianceStructure):
     """
     def __init__(self, n_levels, n_slopes, K_group, full_levels, train_levels, K_slope=None, jitter=1e-4):
         super().__init__(n_levels, n_slopes)
-        if isinstance(K_group, np.ndarray):
-            K_group = torch.tensor(K_group, dtype=torch.float32)
+        K_group = _covariance_matrix(K_group, len(full_levels), "K_group")
         self.register_buffer("K_full", K_group)
         self.jitter = jitter
 
@@ -171,6 +222,7 @@ class KroneckerCovariance(CovarianceStructure):
         self.level_to_idx = {lev: i for i, lev in enumerate(self.full_levels)}
         train_idx = torch.tensor([self.level_to_idx[l] for l in self.train_levels], dtype=torch.long)
         
+        self.register_buffer("train_idx", train_idx)
         # Subsets
         self.register_buffer("K_train", K_group.index_select(0, train_idx).index_select(1, train_idx))
         self.register_buffer("K_cross", K_group.index_select(1, train_idx)) # All rows, train cols
@@ -178,23 +230,22 @@ class KroneckerCovariance(CovarianceStructure):
         if K_slope is None:
             self.raw_lower_slope = nn.Parameter(torch.zeros(n_slopes, n_slopes))
         else:
-            if isinstance(K_slope, np.ndarray):
-                K_slope = torch.tensor(K_slope, dtype=torch.float32)
-            self.raw_lower_slope = nn.Parameter(torch.linalg.cholesky(K_slope + jitter * torch.eye(K_slope.shape[0])))
+            K_slope = _covariance_matrix(K_slope, n_slopes, "K_slope")
+            chol = torch.linalg.cholesky(K_slope)
+            diagonal = (chol.diag() - jitter).clamp_min(1e-8)
+            raw_diag = diagonal + torch.log(-torch.expm1(-diagonal))
+            self.raw_lower_slope = nn.Parameter(torch.tril(chol, -1) + torch.diag(raw_diag))
 
     def forward(self, v, indices=None):
         # v: [n_train, slopes, emb] - variational params for training set
-        if v.shape[0] == self.K_train.shape[0] + 1:
-            # Assume index 0 is invalid/unknown params and valid levels start at 1
-            v = v[1:]
-            
+
         # L_slope
         tril = torch.tril(self.raw_lower_slope)
         diag = torch.diag(F.softplus(torch.diag(self.raw_lower_slope)) + self.jitter)
         L_slope = tril - torch.diag(torch.diag(tril)) + diag  # [slopes, slopes]
 
         # L_group (Train)
-        eye = torch.eye(self.K_train.shape[0], device=self.K_train.device)
+        eye = torch.eye(self.K_train.shape[0], device=v.device, dtype=v.dtype)
         try:
             L_group = torch.linalg.cholesky(self.K_train + self.jitter * eye)
         except RuntimeError:
@@ -233,15 +284,9 @@ class KroneckerCovariance(CovarianceStructure):
         u_all_flat = self.K_cross @ alpha_flat # [N_full, S*E]
         u_all = u_all_flat.reshape(-1, n_slopes, emb)
 
-        if indices is None:
-            return u_all
-
-        # Gather
-        idx_adj = torch.clamp(indices, min=0)
-        unknown_row = u_all.mean(dim=0, keepdim=True)
-        u_all_padded = torch.cat([unknown_row, u_all], dim=0)
-        gathered = u_all_padded[idx_adj]
-        return gathered
+        # Interpolation applies only to held-out levels, never shrink training values.
+        u_all = u_all.index_copy(0, self.train_idx, u_train)
+        return _gather_levels(u_all, indices)
 
 
 class GPCovariance(CovarianceStructure):
@@ -252,6 +297,8 @@ class GPCovariance(CovarianceStructure):
     def __init__(self, n_levels, n_slopes, full_levels, train_levels, coords, lambda_k=1e-4):
         super().__init__(n_levels, n_slopes)
         coords = np.asarray(coords)
+        if coords.ndim == 1:
+            coords = coords[:, None]
         if coords.shape[0] != len(full_levels):
             raise ValueError("coords must align with full_levels length.")
         self.register_buffer("coords", torch.tensor(coords, dtype=torch.float32))
@@ -292,36 +339,24 @@ class GPCovariance(CovarianceStructure):
 
         # Build train/full kernels per slope
         train_idx = self.train_idx
-        batch_size = indices.shape[0]
         emb = v_train.shape[2]
 
         L_full = self.coords.shape[0]
-        u_all = torch.zeros(L_full, self.n_slopes, emb, device=v_train.device)
+        u_all = v_train.new_zeros(L_full, self.n_slopes, emb)
         for s in range(self.n_slopes):
             K_full_s = K_full[s]
             K_train = K_full_s.index_select(0, train_idx).index_select(1, train_idx)
             K_cross = K_full_s.index_select(0, torch.arange(L_full, device=v_train.device))
             K_cross = K_cross.index_select(1, train_idx)
 
-            A = K_train + self.lambda_k * torch.eye(K_train.shape[0], device=K_train.device)
-            rhs = (v_train[:, s, :] * sigma[s])  # [n_train, emb]
-            try:
-                alpha = torch.linalg.solve(A, rhs)  # [n_train, emb]
-            except RuntimeError:
-                alpha = torch.linalg.solve(A + 10 * self.lambda_k * torch.eye(K_train.shape[0], device=K_train.device), rhs)
+            # Kernel helper already adds diagonal jitter to a self-kernel.
+            L = torch.linalg.cholesky(K_train)
+            u_train = sigma[s] * (L @ v_train[:, s, :])
+            alpha = torch.cholesky_solve(u_train, L)
+            u_pred = K_cross @ alpha
+            u_all[:, s, :] = u_pred.index_copy(0, train_idx, u_train)
+        return _gather_levels(u_all, indices)
 
-            u_pred = K_cross @ alpha  # [n_levels, emb]
-            u_all[:, s, :] = u_pred
-
-        if indices is None:
-            return u_all
-
-        # Gather batch rows with UNK padding at 0
-        idx_adj = torch.clamp(indices, min=0)
-        unknown_row = u_all.mean(dim=0, keepdim=True)
-        u_all_padded = torch.cat([unknown_row, u_all], dim=0)
-        gathered = u_all_padded[idx_adj]
-        return gathered
 
 class AR1Covariance(CovarianceStructure):
     """
@@ -378,106 +413,35 @@ class AR1Covariance(CovarianceStructure):
         return torch.cat(u_list, dim=0)
 
 class KCovariance(CovarianceStructure):
-    """
-    Known Kinship/Similarity Matrix K (n_levels x n_levels).
-    u ~ N(0, sigma^2 K).
-    L = Cholesky(K). 
-    u = sigma * L * v
-    K is passed via kwargs probably or set later?
-    Construct with a fixed K.
+    """Known group covariance: u_train = sigma * chol(K_train+jitter I) v.
+
+    The encoder uses q(v) and a standard-normal prior. Other supplied levels
+    return Gaussian conditional means K_cross (K_train+jitter I)^-1 u_train.
+    This point-prediction operator omits conditional residual uncertainty.
     """
     def __init__(self, n_levels, n_slopes, full_levels, train_levels, matrix_tensor, lambda_k=1e-4):
         super().__init__(n_levels, n_slopes)
-        # matrix_tensor: Tensor [L, L] for all levels in full_levels order
-        if isinstance(matrix_tensor, np.ndarray):
-            matrix_tensor = torch.tensor(matrix_tensor, dtype=torch.float32)
-        self.register_buffer("K_full", matrix_tensor)
-        self.full_levels = list(full_levels)
-        self.train_levels = list(train_levels)
+        matrix = _covariance_matrix(matrix_tensor, len(full_levels), "K")
+        self.full_levels, self.train_levels = list(full_levels), list(train_levels)
         self.lambda_k = lambda_k
-
-        # Map levels to indices
-        self.level_to_idx = {lev: i for i, lev in enumerate(self.full_levels)}
-        self.train_to_idx = {lev: i for i, lev in enumerate(self.train_levels)}
-
-        # Build K_train and K_cross (all levels vs train)
-        train_idx = torch.tensor([self.level_to_idx[l] for l in self.train_levels], dtype=torch.long)
-        K_train = matrix_tensor.index_select(0, train_idx).index_select(1, train_idx)
-        K_cross = matrix_tensor.index_select(0, torch.arange(len(self.full_levels)))
-        K_cross = K_cross.index_select(1, train_idx)
-
-        self.register_buffer("K_train", K_train)
-        self.register_buffer("K_cross", K_cross)
-        # Cache for KL computations against N(0, K_train)
-        self.register_buffer("K_logdet", torch.tensor(0.0))
-        self.register_buffer("K_inv", torch.empty(0))
-        self.register_buffer("K_inv_diag", torch.empty(0))
-        self._compute_k_cache()
-
+        self.level_to_idx = {lev: i for i, lev in enumerate(full_levels)}
+        self.train_to_idx = {lev: i for i, lev in enumerate(train_levels)}
+        idx = torch.tensor([self.level_to_idx[x] for x in train_levels], dtype=torch.long)
+        self.register_buffer("train_idx", idx)
+        self.register_buffer("K_full", matrix)
+        self.register_buffer("K_train", matrix.index_select(0, idx).index_select(1, idx))
+        self.register_buffer("K_cross", matrix.index_select(1, idx))
+        chol = torch.linalg.cholesky(self.K_train + lambda_k * torch.eye(len(idx)))
+        self.register_buffer("K_chol", chol)
         self.log_sigma = nn.Parameter(torch.zeros(n_slopes, 1))
 
-    def _compute_k_cache(self):
-        """Precompute logdet(K) and K^{-1} needed for KL against the K prior."""
-        n_train = self.K_train.shape[0]
-        if n_train == 0:
-            self.K_logdet = torch.tensor(0.0, device=self.K_train.device)
-            self.K_inv = torch.empty(0, device=self.K_train.device)
-            self.K_inv_diag = torch.empty(0, device=self.K_train.device)
-            return
-        eye = torch.eye(n_train, device=self.K_train.device)
-        K_reg = self.K_train + self.lambda_k * eye
-        try:
-            L = torch.linalg.cholesky(K_reg)
-        except RuntimeError:
-            L = torch.linalg.cholesky(K_reg + 10 * self.lambda_k * eye)
-        self.K_logdet = 2.0 * torch.log(torch.diag(L)).sum()
-        K_inv = torch.cholesky_inverse(L)
-        self.K_inv = K_inv
-        self.K_inv_diag = torch.diag(K_inv)
-
     def forward(self, v_train, indices=None):
-        """
-        v_train: [n_train_levels, n_slopes, emb] variational means for training levels only
-        indices: [batch] integers from design (0 is unknown; 1..n_levels map into full_levels)
-                 If None, returns embeddings for all full_levels.
-        """
-        sigma = torch.exp(self.log_sigma).view(1, self.n_slopes, 1)
-        # v_train scaled per slope
-        u_train = v_train * sigma  # [n_train, n_slopes, emb]
-
-        # Solve (K_train + lambda I) alpha = u_train for each slope/emb jointly
-        n_train = self.K_train.shape[0]
-        eye = torch.eye(n_train, device=self.K_train.device)
-        
-        # Use minimal jitter for interpolation to respect the latent values exactly
-        # The latent values u_train are already regularized by the KL term
-        jitter = 1e-6
-        A = self.K_train + jitter * eye
-        rhs = u_train.reshape(n_train, -1)  # [n_train, n_slopes*emb]
-        try:
-            alpha = torch.linalg.solve(A, rhs)  # [n_train, n_slopes*emb]
-        except RuntimeError:
-            # Increase jitter if K_train is nearly singular
-            alpha = torch.linalg.solve(A + 10 * self.lambda_k * eye, rhs)
-        alpha = alpha.reshape(n_train, self.n_slopes, u_train.shape[2])
-
-        # Predict all levels (including train) via K_cross @ alpha
-        # K_cross: [n_full, n_train]
-        u_all = torch.einsum("lt, tse -> lse", self.K_cross, alpha)
-
-        if indices is None:
-            return u_all
-
-        # Gather batch rows; indices 0 are unknown -> zero row
-        idx_adj = indices.clone()
-        # clamp negatives
-        idx_adj = torch.clamp(idx_adj, min=0)
-        # build padded to account for unknown at 0; our u_all corresponds to full_levels starting at 0 offset
-        # we insert a zero row at top
-        unknown_row = u_all.mean(dim=0, keepdim=True)
-        u_all_padded = torch.cat([unknown_row, u_all], dim=0)
-        gathered = u_all_padded[idx_adj]
-        return gathered
+        flat = v_train.reshape(len(self.train_levels), -1)
+        u_train = (self.K_chol @ flat).reshape_as(v_train) * self.log_sigma.exp()[None]
+        alpha = torch.cholesky_solve(u_train.reshape(len(self.train_levels), -1), self.K_chol)
+        values = (self.K_cross @ alpha).reshape(-1, self.n_slopes, v_train.shape[-1])
+        values = values.index_copy(0, self.train_idx, u_train)
+        return _gather_levels(values, indices)
 
 class LowRankCovariance(CovarianceStructure):
     """
@@ -498,10 +462,6 @@ class LowRankCovariance(CovarianceStructure):
         return u_flat.view(levels, emb, slopes).permute(0, 2, 1)
 
     def get_matrix(self):
-        # Handle case where n_slopes=1
-        if self.n_slopes == 1:
-            D = torch.exp(self.log_diag)
-            return D + self.V ** 2
         D = torch.diag(torch.exp(self.log_diag).squeeze(-1))
         return D + self.V @ self.V.T
 

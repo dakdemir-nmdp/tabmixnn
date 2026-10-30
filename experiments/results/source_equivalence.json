@@ -1,0 +1,79 @@
+{
+  "reason": "Whitespace-only cleanup after execution; exact pre-execution file can be reconstructed with listed line replacements.",
+  "path": "core/model.py",
+  "executed_sha256": "d21e146ae0bc59475bc6e95be7dc96b13afedeed58b436a2d97c4e78fbc57192",
+  "delivered_sha256": "ed23bd381fcc8520b73925e10efc9aad349dd5b3fe419dcc839202beb088910c",
+  "ast_equal": true,
+  "replacements": [
+    {
+      "line": 1695,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1705,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1708,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1711,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1714,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1720,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1774,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1780,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1783,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1790,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1800,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1804,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1809,
+      "before": "    \n",
+      "after": "\n"
+    },
+    {
+      "line": 1822,
+      "before": "    \n",
+      "after": "\n"
+    }
+  ]
+}

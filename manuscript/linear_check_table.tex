@@ -1,0 +1,14 @@
+\begin{table}[htbp]
+\centering
+\small
+\caption{Sleepstudy linear-model check: raw RMSE (ms). Linear VI uses a scalar identity decoder and unstructured intercept/slope covariance; lme4 fits the same linear mean and random-effects structure by ML. Near agreement of predictions does not imply identical covariance estimation or REML equivalence.}
+\label{tab:linear_check}
+\begin{tabular}{lrr}
+\toprule
+Regime & Linear VI & LMM (ML) \\
+\midrule
+A & $32.503 \pm 0.104$ & 32.190 \\
+B & $29.292 \pm 0.141$ & 29.446 \\
+\bottomrule
+\end{tabular}
+\end{table}

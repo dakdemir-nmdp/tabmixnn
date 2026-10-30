@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tabmixnn"
+version = "0.4.1"
+description = "Mixed Effects Neural Networks for Tabular Data"
+authors = [{name = "Deniz Akdemir", email = "deniz.akdemir.work@gmail.com"}]
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "pandas",
+    "patsy",
+    "scikit-learn",
+    "tqdm",
+    "requests",
+]
+
+[project.optional-dependencies]
+examples = [
+    "matplotlib",
+    "scipy",
+    "xgboost",
+]
+lifelines = ["lifelines"]
+
+[tool.setuptools]
+packages = ["tabmixnn", "tabmixnn.core", "tabmixnn.covariance", "tabmixnn.layers", "tabmixnn.backbones", "tabmixnn.parsing", "tabmixnn.utils"]
+
+[tool.setuptools.package-dir]
+tabmixnn = "."

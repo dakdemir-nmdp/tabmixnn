@@ -69,8 +69,7 @@ Discrete-time models:
 ```python
 import numpy as np
 import pandas as pd
-from tabmixnn import TabMixNN, OutcomeSpec
-from tabmixnn.families import DiscreteTimeSurvival
+from tabmixnn import TabMixNN, OutcomeSpec, DiscreteTimeSurvival
 
 # Define time bins (interval boundaries)
 time_bins = np.array([0, 6, 12, 24, 36, 48, 60])  # Months
@@ -189,7 +188,7 @@ Patients can experience:
 ### Setup
 
 ```python
-from tabmixnn.families import DiscreteTimeCompetingRisks
+from tabmixnn import DiscreteTimeCompetingRisks
 
 # Data format
 transplant_df = pd.DataFrame({
@@ -252,7 +251,7 @@ Unlike survival curves, CIFs:
 Parametric survival model (Weibull/exponential distribution).
 
 ```python
-from tabmixnn.families import ContinuousSurvival
+from tabmixnn import ContinuousSurvival
 
 outcomes = [
     OutcomeSpec(

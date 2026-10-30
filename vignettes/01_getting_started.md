@@ -202,8 +202,7 @@ TabMixNN supports multiple outcome distributions through the `family` parameter.
 
 ```python
 from tabmixnn import TabMixNNRegressor
-from tabmixnn.families import Gaussian
-from tabmixnn.formula import OutcomeSpec
+from tabmixnn import Gaussian, OutcomeSpec
 
 # Using convenience class
 model = TabMixNNRegressor(formula="y ~ x1 + x2 + (1|group)")
@@ -216,8 +215,7 @@ model = TabMixNN(formula="~ x1 + x2 + (1|group)", outcomes=outcomes)
 #### Binary Outcomes: Binomial
 
 ```python
-from tabmixnn import TabMixNNClassifier
-from tabmixnn.families import Binomial
+from tabmixnn import TabMixNNClassifier, Binomial
 
 # Using convenience class
 model = TabMixNNClassifier(formula="binary_outcome ~ x1 + x2 + (1|group)")
@@ -229,7 +227,7 @@ outcomes = [OutcomeSpec(name='binary', y='binary_outcome', family=Binomial())]
 #### Count Data: Poisson and Negative Binomial
 
 ```python
-from tabmixnn.families import Poisson, NegBinomial
+from tabmixnn import Poisson, NegBinomial
 
 # Poisson for count data
 outcomes = [OutcomeSpec(name='count', y='visit_count', family=Poisson())]
@@ -241,14 +239,15 @@ outcomes = [OutcomeSpec(name='count', y='visit_count', family=NegBinomial())]
 #### Survival Outcomes
 
 ```python
-from tabmixnn.families import DiscreteTimeSurvival
+from tabmixnn import DiscreteTimeSurvival
+import numpy as np
 
 outcomes = [
     OutcomeSpec(
         name='survival',
         time='time_to_event',
         event='event_indicator',
-        family=DiscreteTimeSurvival(max_time=10)
+        family=DiscreteTimeSurvival(time_bins=list(range(11)))  # 10 intervals: 0..10
     )
 ]
 ```
@@ -264,7 +263,7 @@ model = TabMixNNRegressor(
     formula="y ~ x1 + x2 + (1|group)",
     epochs=50,              # Number of training epochs
     batch_size=64,          # Batch size for training
-    learning_rate=0.01,     # Learning rate
+    lr=0.01,              # Learning rate
     verbose=True,           # Print training progress
     patience=10,            # Early stopping patience
 )
@@ -374,7 +373,7 @@ if missing:
 
 **Solutions**:
 - Increase epochs: `epochs=100`
-- Adjust learning rate: `learning_rate=0.001`
+- Adjust learning rate: `lr=0.001`
 - Change batch size: `batch_size=128`
 - Scale your features: `df['age'] = (df['age'] - df['age'].mean()) / df['age'].std()`
 

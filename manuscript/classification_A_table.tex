@@ -1,0 +1,22 @@
+\begin{table}[htbp]
+\centering
+\small
+\caption{Classification AUROC (higher is better) and Brier score (lower is better). Regime A: observation holdout within known groups. Neural entries are mean $\pm$ sample SD over three initialization seeds on one fixed split; other methods use one fit. These SDs are not confidence intervals.}
+\label{tab:classification_A}
+\begin{tabular}{llrrrrr}
+\toprule
+Dataset & Metric & TabMixNN & Fixed NN & Mixed & XGBoost & RF \\
+\midrule
+Contraception & AUC & $0.674 \pm 0.008$ & $0.669 \pm 0.001$ & 0.690 & 0.711 & 0.698 \\
+Contraception & Brier & $0.228 \pm 0.006$ & $0.224 \pm 0.001$ & 0.216 & 0.211 & 0.216 \\
+Toenail & AUC & $0.942 \pm 0.006$ & $0.687 \pm 0.010$ & 0.937 & 0.735 & 0.911 \\
+Toenail & Brier & $0.057 \pm 0.004$ & $0.168 \pm 0.001$ & 0.065 & 0.154 & 0.126 \\
+VerbAgg & AUC & $0.838 \pm 0.001$ & $0.696 \pm 0.004$ & 0.807 & 0.772 & 0.809 \\
+VerbAgg & Brier & $0.165 \pm 0.002$ & $0.224 \pm 0.003$ & 0.179 & 0.197 & 0.183 \\
+Train & AUC & $0.832 \pm 0.022$ & $0.739 \pm 0.025$ & 0.786 & 0.775 & 0.753 \\
+Train & Brier & $0.179 \pm 0.014$ & $0.227 \pm 0.014$ & 0.192 & 0.193 & 0.211 \\
+Exam & AUC & $0.796 \pm 0.004$ & $0.786 \pm 0.009$ & 0.816 & 0.807 & 0.773 \\
+Exam & Brier & $0.187 \pm 0.002$ & $0.192 \pm 0.005$ & 0.175 & 0.180 & 0.199 \\
+\bottomrule
+\end{tabular}
+\end{table}

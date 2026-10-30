@@ -1,0 +1,22 @@
+\begin{table}[htbp]
+\centering\small
+\caption{AUROC over five fixed repeated holdouts. Each neural split value is the mean metric across three initialization seeds. Entries are mean $\pm$ sample SD across split values. Reused observations and repeated group partitions make these descriptive SDs, not standard errors or confidence intervals.}
+\label{tab:split_classification}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llrrrrr}
+\toprule
+Dataset & Regime & TabMixNN & Fixed NN & Mixed & XGBoost & RF \\
+\midrule
+Contraception & A & $0.662 \pm 0.022$ & $0.623 \pm 0.028$ & $0.672 \pm 0.020$ & $0.675 \pm 0.027$ & $0.680 \pm 0.020$ \\
+Contraception & B & $0.623 \pm 0.021$ & $0.628 \pm 0.025$ & $0.624 \pm 0.039$ & $0.637 \pm 0.022$ & $0.629 \pm 0.018$ \\
+Toenail & A & $0.951 \pm 0.014$ & $0.670 \pm 0.020$ & $0.941 \pm 0.005$ & $0.717 \pm 0.021$ & $0.922 \pm 0.014$ \\
+Toenail & B & $0.591 \pm 0.068$ & $0.682 \pm 0.024$ & $0.695 \pm 0.035$ & $0.658 \pm 0.029$ & $0.646 \pm 0.020$ \\
+VerbAgg & A & $0.840 \pm 0.017$ & $0.703 \pm 0.020$ & $0.817 \pm 0.015$ & $0.779 \pm 0.021$ & $0.808 \pm 0.021$ \\
+VerbAgg & B & $0.703 \pm 0.011$ & $0.693 \pm 0.018$ & $0.716 \pm 0.012$ & $0.683 \pm 0.017$ & $0.674 \pm 0.015$ \\
+Train & A & $0.817 \pm 0.011$ & $0.723 \pm 0.017$ & $0.765 \pm 0.019$ & $0.759 \pm 0.016$ & $0.723 \pm 0.023$ \\
+Train & B & $0.736 \pm 0.007$ & $0.701 \pm 0.015$ & $0.742 \pm 0.026$ & $0.704 \pm 0.017$ & $0.693 \pm 0.018$ \\
+Exam & A & $0.798 \pm 0.005$ & $0.783 \pm 0.007$ & $0.811 \pm 0.006$ & $0.811 \pm 0.008$ & $0.783 \pm 0.007$ \\
+Exam & B & $0.749 \pm 0.013$ & $0.728 \pm 0.024$ & $0.797 \pm 0.013$ & $0.773 \pm 0.015$ & $0.754 \pm 0.020$ \\
+\bottomrule
+\end{tabular}}
+\end{table}

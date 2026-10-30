@@ -1,0 +1,19 @@
+\begin{table}[htbp]
+\centering
+\small
+\caption{Sleepstudy component comparisons on the same Regime-A split. RMSE is in milliseconds. Entries are mean $\pm$ sample SD over three seeds. Except for the scalar linear decoder, all variants use one hidden layer of width 32 and embedding dimension 8; all use the same 2,000-update budget. Structural variants use feature mixing without sparsity or contraction penalties. This is a component comparison, not a hyperparameter search.}
+\label{tab:ablation_comprehensive}
+\begin{tabular}{lrr}
+\toprule
+Configuration & RMSE $\downarrow$ & $R^2$ $\uparrow$ \\
+\midrule
+Intercept + slope & $33.597 \pm 2.217$ & $0.597 \pm 0.054$ \\
+Intercept only & $33.900 \pm 1.646$ & $0.590 \pm 0.039$ \\
+Fixed only & $48.007 \pm 0.269$ & $0.180 \pm 0.009$ \\
+Linear decoder & $32.503 \pm 0.104$ & $0.624 \pm 0.002$ \\
+Static & $32.312 \pm 2.473$ & $0.627 \pm 0.058$ \\
+Dynamic & $31.940 \pm 0.444$ & $0.637 \pm 0.010$ \\
+Gated static + dynamic & $32.013 \pm 0.965$ & $0.635 \pm 0.022$ \\
+\bottomrule
+\end{tabular}
+\end{table}

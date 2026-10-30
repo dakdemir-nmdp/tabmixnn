@@ -1,0 +1,22 @@
+\begin{table}[htbp]
+\centering
+\small
+\caption{Datasets and held-out samples. $p$ counts substantive predictors before one-hot encoding, excluding group identity and the intercept; $G$ counts groups. R: regression; C: classification. A and B give held-out rows; parentheses in B give held-out groups.}
+\label{tab:datasets}
+\begin{tabular}{lrrrrrr}
+\toprule
+Dataset & $n$ & $p$ & $G$ & Task & A & B ($G$) \\
+\midrule
+Sleepstudy & 180 & 1 & 18 & R & 36 & 40 (4) \\
+ChickWeight & 578 & 2 & 50 & R & 143 & 144 (12) \\
+MathAchieve & 7,185 & 4 & 160 & R & 1742 & 1792 (40) \\
+Spruce & 1,027 & 1 & 79 & R & 237 & 247 (19) \\
+Radon & 919 & 2 & 85 & R & 219 & 227 (21) \\
+Contraception & 1,934 & 3 & 60 & C & 461 & 597 (15) \\
+Toenail & 1,908 & 3 & 294 & C & 289 & 491 (73) \\
+VerbAgg & 7,584 & 5 & 316 & C & 1896 & 1896 (79) \\
+Train & 2,929 & 8 & 235 & C & 642 & 723 (58) \\
+Exam & 4,059 & 6 & 65 & C & 989 & 935 (16) \\
+\bottomrule
+\end{tabular}
+\end{table}

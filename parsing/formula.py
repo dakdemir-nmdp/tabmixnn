@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import pickle
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from patsy import dmatrix, build_design_matrices, PatsyError
 from ..core.families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks
 
@@ -11,14 +11,15 @@ from ..core.families import DiscreteTimeSurvival, DiscreteTimeCompetingRisks
 class OutcomeSpec:
     name: str
     family: Any # Family instance
-    y: Optional[str] = None
+    y: Optional[Union[str, List[str]]] = None
     time: Optional[str] = None
     event: Optional[str] = None
     cause: Optional[str] = None
     loss_weight: float = 1.0
     
     def get_target_cols(self):
-        if self.y: return [self.y]
+        if self.y:
+            return [self.y] if isinstance(self.y, str) else list(self.y)
         # Competing risks: time + cause only (no event column)
         if self.cause: return [self.time, self.cause]
         # Standard survival: time + event
@@ -58,6 +59,11 @@ class CompiledDesign:
         self.random_terms = [] # List[RandomEffectTerm]
         
     def fit(self, df):
+        for outcome in self.outcomes:
+            cols = outcome.get_target_cols()
+            if not cols or any(c not in df.columns for c in cols):
+                raise ValueError(f"Missing target columns for outcome '{outcome.name}': {cols}")
+            outcome.family.validate_targets(df, cols)
         # 1. Parse Formula
         fixed_part, random_parts = self._parse_formula(self.formula)
         
@@ -70,7 +76,7 @@ class CompiledDesign:
         self.is_fitted = True
         return self
 
-    def transform(self, df, mode='predict'):
+    def transform(self, df, mode='predict', include_targets=True):
         # mode='fit' or 'predict'
         # Returns:
         # X: fixed design matrix (Tensor)
@@ -85,8 +91,12 @@ class CompiledDesign:
         Ys = {}
         # Only try to extract Y if we are not purely predicting on new inputs
         # But if fit_transform was called or user passed targets
-        for outcome in self.outcomes:
+        for outcome in self.outcomes if include_targets else []:
             cols = outcome.get_target_cols()
+            if mode == 'fit':
+                if not cols or any(c not in df.columns for c in cols):
+                    raise ValueError(f"Missing target columns for outcome '{outcome.name}': {cols}")
+                outcome.family.validate_targets(df, cols)
             if all(c in df.columns for c in cols):
                 Ys[outcome.name] = self._extract_outcome(df, outcome)
         
@@ -123,7 +133,7 @@ class CompiledDesign:
         # A standalone "1" indicates an intercept and should not be treated as a column
         fixed_terms = [t for t in fixed_terms if t != '1']
         # Legacy default: handle intercept via bias, not explicit column
-        self.intercept_included = False
+        self.intercept_included = intercept
             
         # Parse random terms
         random_terms_spec = []
@@ -173,16 +183,20 @@ class CompiledDesign:
         """Clean and type-cast fixed effect columns for patsy."""
         df_clean = df.copy()
         for col in df_clean.columns:
+            if not fit and col not in self.numeric_transformer_params and col not in self.categorical_levels:
+                continue
             if pd.api.types.is_numeric_dtype(df_clean[col]):
-                if fit or col not in self.numeric_transformer_params:
+                if fit:
                     mu = df_clean[col].mean()
                     sigma = df_clean[col].std() if df_clean[col].std() != 0 else 1.0
                     self.numeric_transformer_params[col] = (mu, sigma)
                 mu, _ = self.numeric_transformer_params.get(col, (0.0, 1.0))
                 df_clean[col] = df_clean[col].fillna(mu)
             else:
+                if not fit and col not in self.categorical_levels:
+                    continue
                 # Treat as categorical with explicit UNKNOWN level
-                if fit or col not in self.categorical_levels:
+                if fit:
                     levels = sorted(df_clean[col].dropna().astype(str).unique().tolist())
                     if "__UNKNOWN__" not in levels:
                         levels.append("__UNKNOWN__")
@@ -198,8 +212,7 @@ class CompiledDesign:
         return df_clean
 
     def _fit_fixed(self, df, fixed_part):
-        # Legacy behavior: rely on model bias, not explicit intercept column
-        self.intercept_included = False
+        self.intercept_included = fixed_part["intercept"]
         rhs = self._build_fixed_formula(fixed_part)
         self.fixed_formula = f"~ {rhs}"
 
@@ -225,10 +238,16 @@ class CompiledDesign:
             X = np.asarray(mats[0], dtype=np.float32)
         except PatsyError as e:
             raise ValueError(f"Failed to build fixed design matrix with formula '{self.fixed_formula}': {e}") from e
+        if len(X) != len(df) or not np.isfinite(X).all():
+            raise ValueError("Fixed predictors must produce finite values for every row; check all-missing columns and formula transforms")
         return X
 
     def export_state(self) -> Dict[str, Any]:
         """Export a picklable snapshot of the design (avoids patsy objects)."""
+        if self.design_info is not None and any(
+            info.state.get("transforms") for info in self.design_info.factor_infos.values()
+        ):
+            raise NotImplementedError("Saving stateful Patsy transforms is unsupported; preprocess explicitly using training-only parameters")
         return {
             "formula": self.formula,
             "outcomes": self.outcomes,
@@ -259,10 +278,7 @@ class CompiledDesign:
             cat = pd.Categorical([levels_list[0]], categories=levels_list)
             data[col] = cat
 
-        if not data:
-            return
-
-        df_dummy = pd.DataFrame(data)
+        df_dummy = pd.DataFrame(data) if data else pd.DataFrame(index=[0])
         design_mat = dmatrix(self.fixed_formula, df_dummy, return_type="dataframe")
         self.design_info = design_mat.design_info
         self.fixed_feature_names = list(self.design_info.column_names)
@@ -298,12 +314,19 @@ class CompiledDesign:
             maybe_cov = self.cov_struct_map.get(group, {})
             use_k_levels = False
             if isinstance(maybe_cov, dict):
-                use_k_levels = maybe_cov.get("type") == "K" and "levels" in maybe_cov
+                use_k_levels = maybe_cov.get("type", "").upper() in ("K", "KRON", "GP") and "levels" in maybe_cov
 
             if use_k_levels:
                 levels_list = list(maybe_cov["levels"])
                 mapping = {val: i+1 for i, val in enumerate(levels_list)}
-                train_levels = maybe_cov.get("train_levels", levels_list)
+                if len(set(levels_list)) != len(levels_list):
+                    raise ValueError(f"Duplicate covariance levels for {group}.")
+                observed = set(df[group].dropna().unique())
+                if not observed.issubset(set(levels_list)):
+                    raise ValueError(f"Training groups missing from covariance levels for {group}.")
+                train_levels = list(maybe_cov.get("train_levels", [x for x in levels_list if x in observed]))
+                if len(set(train_levels)) != len(train_levels) or set(train_levels) != observed:
+                    raise ValueError(f"train_levels must contain exactly the observed training groups for {group}.")
             else:
                 uniques = df[group].dropna().unique()
                 mapping = {val: i+1 for i, val in enumerate(uniques)}
@@ -357,10 +380,11 @@ class CompiledDesign:
                     # Assume numeric slope for now
                     mu, sigma = term.slope_stats.get(s, (0.0, 1.0))
                     vals = df[s].fillna(mu)
-                    vals = (vals - mu) / sigma
                     slope_vals.append(vals.values)
             
             slope_mat = np.stack(slope_vals, axis=1).astype(np.float32)
+            if not np.isfinite(slope_mat).all():
+                raise ValueError("Random slopes must be finite after training-mean imputation")
             Z_slopes.append(slope_mat)
             
         return Z_ind, Z_slopes
@@ -375,26 +399,30 @@ class CompiledDesign:
             # Map continuous/discrete times to bin indices
             time_vals = df[outcome.time].values
             event = df[outcome.event].values
-            time_idx = self._time_to_index(family.time_bins, time_vals)
+            time_idx = self._time_to_index(family.time_bins, time_vals, event)
             return np.stack([time_idx, event], axis=1).astype(np.float32)
 
         if isinstance(family, DiscreteTimeCompetingRisks):
             time_vals = df[outcome.time].values
             cause_vals = df[outcome.cause].values
-            time_idx = self._time_to_index(family.time_bins, time_vals)
+            time_idx = self._time_to_index(family.time_bins, time_vals, cause_vals)
             return np.stack([time_idx, cause_vals], axis=1).astype(np.float32)
 
         return df[cols].values.astype(np.float32)
 
-    def _time_to_index(self, time_bins, time_array):
+    def _time_to_index(self, time_bins, time_array, event=None):
         """
         Convert raw times to discrete bin indices in [0, len(time_bins)-1].
-        Uses searchsorted with right-closed intervals and clips out-of-range times.
+        Events use their containing right-closed interval. Censoring contributes
+        only completed intervals; -1 denotes censoring before the first endpoint.
+        Target validation rejects follow-up beyond the supplied grid.
         """
         tb = np.asarray(time_bins)
-        idx = np.searchsorted(tb, time_array, side="right")
-        idx = np.clip(idx, 0, len(tb) - 1)
-        return idx.astype(np.int64)
+        idx = np.searchsorted(tb, time_array, side="left")
+        if event is not None:
+            completed = np.searchsorted(tb, time_array, side="right") - 1
+            idx = np.where(np.asarray(event) == 0, completed, idx)
+        return np.where(pd.isna(time_array), np.nan, idx).astype(np.float32)
 
     def save(self, path):
         with open(path, 'wb') as f:

@@ -40,9 +40,11 @@ print("="*70)
 def load_colon_data():
     """Load colon cancer dataset from Rdatasets."""
     try:
+        import requests, io
         url = "https://vincentarelbundock.github.io/Rdatasets/csv/survival/colon.csv"
-        df = pd.read_csv(url, index_col=0)
-        return df
+        resp = requests.get(url, verify=False, timeout=30)
+        resp.raise_for_status()
+        return pd.read_csv(io.StringIO(resp.text), index_col=0)
     except Exception as e:
         print(f"Error loading data: {e}")
         return None
